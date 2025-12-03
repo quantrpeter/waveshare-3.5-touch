@@ -8,6 +8,7 @@ import i2c
 import ft6x36
 import pointer_framework
 import task_handler
+from fs_driver import fs_register
 
 # Display settings for Waveshare ESP32-S3-Touch-LCD-3.5
 _WIDTH = 320
@@ -36,8 +37,8 @@ SCREEN_HEIGHT = 320
 BIRD_SIZE = 30
 PIPE_WIDTH = 50
 PIPE_GAP = 120
-GRAVITY = 1.2
-JUMP_STRENGTH = -8
+GRAVITY = 0.7
+JUMP_STRENGTH = -4
 PIPE_SPEED = 3
 
 print("Initializing SPI bus...")
@@ -45,6 +46,9 @@ spi_bus = machine.SPI.Bus(host=_HOST, mosi=_MOSI, miso=_MISO, sck=_SCK)
 
 print("Initializing display bus...")
 display_bus = lcd_bus.SPIBus(spi_bus=spi_bus, freq=_LCD_FREQ, dc=_DC, cs=_LCD_CS)
+
+buf1 = display_bus.allocate_framebuffer(100*320*2, lcd_bus.MEMORY_SPIRAM)
+buf2 = display_bus.allocate_framebuffer(100*320*2, lcd_bus.MEMORY_SPIRAM)
 
 print("Initializing ST7796 display...")
 display = st7796.ST7796(
@@ -59,6 +63,8 @@ display = st7796.ST7796(
     rgb565_byte_swap=True,
     offset_x=_OFFSET_X,
     offset_y=_OFFSET_Y,
+    frame_buffer1=buf1,
+    frame_buffer2=buf2,
 )
 
 display.init()
@@ -83,6 +89,7 @@ th = task_handler.TaskHandler()
 # Create screen
 scrn = lv.screen_active()
 scrn.set_style_bg_color(lv.color_hex(0x87CEEB), 0)  # Sky blue background
+scrn.set_scrollbar_mode(lv.SCROLLBAR_MODE.OFF)
 
 # Game variables
 bird_y = float(SCREEN_HEIGHT // 2)
@@ -111,9 +118,20 @@ score_label.set_style_text_font(lv.font_montserrat_16, 0)
 # Create start/restart message
 msg_label = lv.label(scrn)
 msg_label.set_text("TAP TO START")
-msg_label.align(lv.ALIGN.CENTER, 0, 0)
+msg_label.align(lv.ALIGN.CENTER, 0, 120)
 msg_label.set_style_text_color(lv.color_hex(0xFFFFFF), 0)
 msg_label.set_style_text_font(lv.font_montserrat_16, 0)
+
+# Register filesystem driver
+print("Registering filesystem...")
+fs_drv = lv.fs_drv_t()
+fs_register(fs_drv, "S")
+
+# Create start image
+# start_img = lv.image(scrn)
+# start_img.set_src("S:semiblockGames100.jpg")
+# start_img.set_size(200, 100)
+# start_img.align(lv.ALIGN.CENTER, 0, 0)
 
 # Jump trigger flag
 jump_requested = False
@@ -185,18 +203,14 @@ def reset_game():
     game_over = False
     game_started = False
     msg_label.set_text("TAP TO START")
+    # start_img.set_style_opa(lv.OPA.COVER, 0)
 
 def bird_jump():
     global bird_velocity, game_started
     if not game_started:
         game_started = True
         msg_label.set_text("")
-        spawn_pipe()
-    
-    if not game_over:
-        bird_velocity = JUMP_STRENGTH
-
-        msg_label.set_text("")
+        # start_img.set_style_opa(lv.OPA.TRANSP, 0)
         spawn_pipe()
     
     if not game_over:
@@ -205,7 +219,6 @@ def bird_jump():
 # Touch event handler
 def touch_event_cb(event):
     global jump_requested
-    print("tap")
     code = event.get_code()
     if code == lv.EVENT.PRESSED or code == lv.EVENT.CLICKED:
         jump_requested = True
@@ -216,22 +229,7 @@ scrn.add_event_cb(touch_event_cb, lv.EVENT.CLICKED, None)
 
 # Game variables for timing
 frame_count = 0
-pipe_spawn_interval = 80  # Frames between pipes
-# Touch event handler
-def touch_event_cb(event):
-    global jump_requested
-    print("tap")
-    code = event.get_code()
-    if code == lv.EVENT.PRESSED or code == lv.EVENT.CLICKED:
-        jump_requested = True
-
-# Add event handler to the screen itself
-scrn.add_event_cb(touch_event_cb, lv.EVENT.PRESSED, None)
-scrn.add_event_cb(touch_event_cb, lv.EVENT.CLICKED, None)
-
-# Game variables for timing
-frame_count = 0
-pipe_spawn_interval = 80  # Frames between pipes
+pipe_spawn_interval = 150  # Frames between pipes
 
 print("Game ready! Tap to start...")
 
