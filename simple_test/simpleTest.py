@@ -133,7 +133,12 @@ fs_register(fs_drv, "S")
 img = lv.image(scrn)
 img.set_src("S:blue_1.png")
 img.set_size(480, 85)
-img.set_pos(0, 20)
+img.set_pos(0, 0)
+
+img = lv.image(scrn)
+img.set_src("S:sps.jpg")
+img.set_size(480, 344)
+img.set_pos(0, 85)
 
 print("Refreshing display...")
 lv.refr_now(lv.screen_active().get_display())

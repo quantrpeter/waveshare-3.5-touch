@@ -4,4 +4,4 @@ upload:
 	#mpremote cp multimeter_c6.py :main.py
 
 run:
-	mpremote reset && mpremote run simpleTest.py
+	mpremote reset && sleep 2 && mpremote run simpleTest.py
