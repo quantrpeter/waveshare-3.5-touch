@@ -7,6 +7,7 @@ import random
 import i2c
 import ft6x36
 import pointer_framework
+import task_handler
 
 # Display settings for Waveshare ESP32-S3-Touch-LCD-3.5
 _WIDTH = 320
@@ -67,6 +68,7 @@ print("Initializing FT6336 touch...")
 i2c_bus = i2c.I2C.Bus(host=0, scl=_I2C_SCL, sda=_I2C_SDA, freq=400000, use_locks=False)
 touch_dev = i2c.I2C.Device(bus=i2c_bus, dev_id=_TOUCH_I2C_ADDR, reg_bits=ft6x36.BITS)
 indev = ft6x36.FT6x36(touch_dev, startup_rotation=pointer_framework.lv.DISPLAY_ROTATION._90)
+print("Touch driver initialized")
 
 # Set rotation AFTER touch initialization
 display.set_rotation(lv.DISPLAY_ROTATION._90)
@@ -74,6 +76,9 @@ display.set_color_inversion(True)
 display.set_backlight(100)
 
 print("Display ready")
+
+# Initialize task handler for LVGL
+th = task_handler.TaskHandler()
 
 # Create screen
 scrn = lv.screen_active()
@@ -191,25 +196,38 @@ def bird_jump():
     if not game_over:
         bird_velocity = JUMP_STRENGTH
 
+        msg_label.set_text("")
+        spawn_pipe()
+    
+    if not game_over:
+        bird_velocity = JUMP_STRENGTH
+
 # Touch event handler
 def touch_event_cb(event):
     global jump_requested
+    print("tap")
     code = event.get_code()
     if code == lv.EVENT.PRESSED or code == lv.EVENT.CLICKED:
         jump_requested = True
 
-# Create a full-screen object for touch detection
-touch_area = lv.obj(scrn)
-touch_area.set_size(SCREEN_WIDTH, SCREEN_HEIGHT)
-touch_area.set_pos(0, 0)
-touch_area.set_style_bg_opa(0, 0)  # Transparent
-touch_area.set_style_border_width(0, 0)
-touch_area.add_event_cb(touch_event_cb, lv.EVENT.PRESSED, None)
+# Add event handler to the screen itself
+scrn.add_event_cb(touch_event_cb, lv.EVENT.PRESSED, None)
+scrn.add_event_cb(touch_event_cb, lv.EVENT.CLICKED, None)
 
-# Move bird and labels to front
-bird.move_foreground()
-score_label.move_foreground()
-msg_label.move_foreground()
+# Game variables for timing
+frame_count = 0
+pipe_spawn_interval = 80  # Frames between pipes
+# Touch event handler
+def touch_event_cb(event):
+    global jump_requested
+    print("tap")
+    code = event.get_code()
+    if code == lv.EVENT.PRESSED or code == lv.EVENT.CLICKED:
+        jump_requested = True
+
+# Add event handler to the screen itself
+scrn.add_event_cb(touch_event_cb, lv.EVENT.PRESSED, None)
+scrn.add_event_cb(touch_event_cb, lv.EVENT.CLICKED, None)
 
 # Game variables for timing
 frame_count = 0
@@ -274,5 +292,4 @@ while True:
     
     # Refresh display
     lv.task_handler()
-    lv.refr_now(None)
     sleep(0.02)  # ~50 FPS
