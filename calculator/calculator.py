@@ -46,7 +46,6 @@ display = st7796.ST7796(
     offset_y=_OFFSET_Y,
 )
 
-display.init()
 
 # Initialize touch in portrait mode (no rotation)
 print("Initializing FT6336 touch...")
@@ -54,12 +53,14 @@ i2c_bus = i2c.I2C.Bus(host=0, scl=_I2C_SCL, sda=_I2C_SDA, freq=400000, use_locks
 touch_dev = i2c.I2C.Device(bus=i2c_bus, dev_id=_TOUCH_I2C_ADDR, reg_bits=ft6x36.BITS)
 indev = ft6x36.FT6x36(touch_dev)
 
+
 print("Touch driver initialized")
 
 # No rotation - use portrait mode
 display.set_color_inversion(True)
 display.set_backlight(100)
-# display.set_rotation(lv.DISPLAY_ROTATION._180)
+display.set_rotation(lv.DISPLAY_ROTATION._180)
+display.init()
 
 print("Display ready")
 
@@ -253,7 +254,7 @@ class CalculatorUI:
         
         self.buttons = {}
         for row, col, text, color, text_color in buttons:
-            x = 5 + col * 72
+            x = 45 + col * 72
             y = 5 + row * 65
             
             btn = self.create_button(btn_container, x, y, text, 68, 60, color, text_color)
