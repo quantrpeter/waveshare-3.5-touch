@@ -154,6 +154,163 @@ if final_status == 1010 or final_status == 3:
     ip = wlan.ifconfig()[0]
     ip_label.set_text(f"IP: {ip}")
     print(f'Connected! IP: {ip}')
+    
+    lv.task_handler()
+    lv.refr_now(None)
+    sleep(1)
+    
+    # Hide connection info
+    status_label.add_flag(lv.obj.FLAG.HIDDEN)
+    ssid_label.add_flag(lv.obj.FLAG.HIDDEN)
+    ip_label.add_flag(lv.obj.FLAG.HIDDEN)
+    
+    # Create keypad screen
+    code_input = ""
+    code_complete = False
+    
+    # Create display label for entered code
+    code_display = lv.label(scrn)
+    code_display.set_text("Enter 4-digit code:")
+    code_display.align(lv.ALIGN.TOP_MID, 0, 20)
+    code_display.set_style_text_color(lv.color_hex(0xFFFFFF), 0)
+    code_display.set_style_text_font(lv.font_montserrat_16, 0)
+    
+    code_label = lv.label(scrn)
+    code_label.set_text("____")
+    code_label.align(lv.ALIGN.TOP_MID, 0, 60)
+    code_label.set_style_text_color(lv.color_hex(0x00FF00), 0)
+    code_label.set_style_text_font(lv.font_montserrat_16, 0)
+    
+    # Button event handlers
+    def num_btn_event_with_num(event, num):
+        global code_input
+        if len(code_input) < 4:
+            code_input += str(num)
+            display_text = code_input + "_" * (4 - len(code_input))
+            code_label.set_text(display_text)
+            print(f"Code: {code_input}")
+    
+    def clear_btn_event(event):
+        global code_input
+        code_input = ""
+        code_label.set_text("____")
+        print("Code cleared")
+    
+    def enter_btn_event(event):
+        global code_input, code_complete
+        print(f"Enter button pressed! Code length: {len(code_input)}")
+        if len(code_input) == 4:
+            code_complete = True
+            print(f"Code entered: {code_input}")
+        else:
+            print(f"Need 4 digits, only have {len(code_input)}")
+    
+    # Create number buttons (3x4 grid)
+    btn_width = 70
+    btn_height = 50
+    btn_spacing = 8
+    start_x = (480 - (3 * btn_width + 2 * btn_spacing)) // 2
+    start_y = 100
+    
+    buttons = []
+    for i in range(1, 10):
+        row = (i - 1) // 3
+        col = (i - 1) % 3
+        
+        btn = lv.button(scrn)
+        btn.set_size(btn_width, btn_height)
+        btn.set_pos(start_x + col * (btn_width + btn_spacing), 
+                   start_y + row * (btn_height + btn_spacing))
+        btn.set_style_bg_color(lv.color_hex(0x4444FF), 0)
+        
+        label = lv.label(btn)
+        label.set_text(str(i))
+        label.set_style_text_font(lv.font_montserrat_16, 0)
+        label.center()
+        
+        # Use lambda with default argument to capture the value
+        btn.add_event_cb(lambda e, num=i: num_btn_event_with_num(e, num), lv.EVENT.CLICKED, None)
+        buttons.append(btn)
+    
+    # Button 0
+    btn_0 = lv.button(scrn)
+    btn_0.set_size(btn_width, btn_height)
+    btn_0.set_pos(start_x + btn_width + btn_spacing, 
+                 start_y + 3 * (btn_height + btn_spacing))
+    btn_0.set_style_bg_color(lv.color_hex(0x4444FF), 0)
+    
+    label_0 = lv.label(btn_0)
+    label_0.set_text("0")
+    label_0.set_style_text_font(lv.font_montserrat_16, 0)
+    label_0.center()
+    
+    btn_0.add_event_cb(lambda e: num_btn_event_with_num(e, 0), lv.EVENT.CLICKED, None)
+    
+    # Clear button
+    btn_clear = lv.button(scrn)
+    btn_clear.set_size(btn_width, btn_height)
+    btn_clear.set_pos(start_x, start_y + 3 * (btn_height + btn_spacing))
+    btn_clear.set_style_bg_color(lv.color_hex(0xFF4444), 0)
+    
+    label_clear = lv.label(btn_clear)
+    label_clear.set_text("CLR")
+    label_clear.set_style_text_font(lv.font_montserrat_16, 0)
+    label_clear.center()
+    
+    btn_clear.add_event_cb(clear_btn_event, lv.EVENT.CLICKED, None)
+    
+    # Enter button
+    btn_enter = lv.button(scrn)
+    btn_enter.set_size(btn_width, btn_height)
+    btn_enter.set_pos(start_x + 2 * (btn_width + btn_spacing), 
+                     start_y + 3 * (btn_height + btn_spacing))
+    btn_enter.set_style_bg_color(lv.color_hex(0x44FF44), 0)
+    
+    label_enter = lv.label(btn_enter)
+    label_enter.set_text("OK")
+    label_enter.set_style_text_font(lv.font_montserrat_16, 0)
+    label_enter.center()
+    
+    btn_enter.add_event_cb(enter_btn_event, lv.EVENT.CLICKED, None)
+    btn_enter.add_event_cb(enter_btn_event, lv.EVENT.PRESSED, None)
+    
+    lv.task_handler()
+    lv.refr_now(None)
+    
+    # Wait for code entry
+    print("Waiting for 4-digit code...")
+    while not code_complete:
+        lv.task_handler()
+        sleep(0.05)
+    
+    # Code entered, fetch from server
+    print(f"Fetching code with: {code_input}")
+    code_display.set_text("Fetching code...")
+    lv.task_handler()
+    
+    try:
+        import urequests
+        url = f"https://build.semiblock.ai/api/getProject?code={code_input}"
+        print(f"URL: {url}")
+        response = urequests.get(url)
+        if response.status_code == 200:
+            code = response.text
+            print(f"Code received ({len(code)} bytes)")
+            code_display.set_text("Executing code...")
+            lv.task_handler()
+            sleep(1)
+            
+            # Execute the code
+            exec(code)
+        else:
+            print(f"Failed to fetch code: HTTP {response.status_code}")
+            code_display.set_text(f"Fetch failed: {response.status_code}")
+            code_display.set_style_text_color(lv.color_hex(0xFF0000), 0)
+        response.close()
+    except Exception as e:
+        print(f"Error fetching/executing code: {e}")
+        code_display.set_text(f"Error: {str(e)}")
+        code_display.set_style_text_color(lv.color_hex(0xFF0000), 0)
 else:
     status_label.set_text(f"Connection Failed! (Status: {final_status})")
     status_label.set_style_text_color(lv.color_hex(0xFF0000), 0)
@@ -163,7 +320,7 @@ lv.task_handler()
 lv.refr_now(None)
 
 # Keep display active
-print("WiFi setup complete")
+print("Setup complete")
 while True:
     lv.task_handler()
     sleep(0.1)
