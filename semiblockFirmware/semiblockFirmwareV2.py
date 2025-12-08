@@ -99,84 +99,212 @@ logo_img.align(lv.ALIGN.TOP_MID, 0, 10)
 
 # Create status label
 status_label = lv.label(scrn)
-status_label.set_text("Connecting to WiFi...")
-status_label.align(lv.ALIGN.CENTER, 0, -40)
+status_label.set_text("Scanning WiFi networks...")
+status_label.align(lv.ALIGN.TOP_MID, 0, 90)
 status_label.set_style_text_color(lv.color_hex(0xFFFFFF), 0)
-status_label.set_style_text_font(lv.font_montserrat_16, 0)
-
-# Create SSID label
-ssid_label = lv.label(scrn)
-ssid_label.set_text(f"SSID: {SSID}")
-ssid_label.align(lv.ALIGN.CENTER, 0, 0)
-ssid_label.set_style_text_color(lv.color_hex(0x00FF00), 0)
-ssid_label.set_style_text_font(lv.font_montserrat_16, 0)
-
-# Create IP label
-ip_label = lv.label(scrn)
-ip_label.set_text("IP: ---")
-ip_label.align(lv.ALIGN.CENTER, 0, 40)
-ip_label.set_style_text_color(lv.color_hex(0x00FFFF), 0)
-ip_label.set_style_text_font(lv.font_montserrat_16, 0)
+status_label.set_style_text_font(lv.font_montserrat_14, 0)
 
 # Initial refresh
 lv.task_handler()
 lv.refr_now(None)
 
-# Connect to WiFi
-print(f"Connecting to WiFi: {SSID}")
-print("WiFi Status Codes:")
-print("  1000 = STAT_IDLE")
-print("  1001 = STAT_CONNECTING") 
-print("  1010 = STAT_GOT_IP (Connected)")
-print("  201 = STAT_WRONG_PASSWORD")
-print("  202 = STAT_NO_AP_FOUND")
-print("  203 = STAT_CONNECT_FAIL")
-print()
-
+# Scan WiFi networks
+print("Scanning WiFi networks...")
 wlan = network.WLAN(network.STA_IF)
 wlan.active(True)
-wlan.connect(SSID, PASSWORD)
+networks = wlan.scan()
 
-# Wait for connection
-max_wait = 30  # Increased wait time
-while max_wait > 0:
-    status = wlan.status()
-    print(f'Waiting for connection... Status: {status}')
-    
-    # Check if connected (status 1010 or 3)
-    if status == 1010 or status == 3:
-        print("Connection successful!")
-        break
-    
-    # Check if connection failed
-    if status in [201, 202, 203] or status < 0:
-        print("Connection failed!")
-        break
-    
-    max_wait -= 1
-    sleep(1)
-    lv.task_handler()
+# Sort by signal strength (RSSI)
+networks_sorted = sorted(networks, key=lambda x: x[3], reverse=True)
 
-# Check connection status
-final_status = wlan.status()
-print(f'Final WiFi status: {final_status}')
+# Create scrollable list for WiFi networks
+wifi_list = lv.list(scrn)
+wifi_list.set_size(440, 200)
+wifi_list.align(lv.ALIGN.TOP_MID, 0, 120)
+wifi_list.set_style_bg_color(lv.color_hex(0x222222), 0)
+wifi_list.set_style_border_width(2, 0)
+wifi_list.set_style_border_color(lv.color_hex(0x4CAF50), 0)
 
-if final_status == 1010 or final_status == 3:
-    status_label.set_text("WiFi Connected!")
-    status_label.set_style_text_color(lv.color_hex(0x00FF00), 0)
-    ip = wlan.ifconfig()[0]
-    ip_label.set_text(f"IP: {ip}")
-    print(f'Connected! IP: {ip}')
+selected_ssid = None
+selected_password = ""
+selected_auth = 0
+
+def show_keyboard_screen(ssid, auth):
+    """Show password entry keyboard screen"""
+    global selected_ssid, selected_auth, selected_password
+    selected_ssid = ssid
+    selected_auth = auth
+    selected_password = ""
+    
+    # Hide WiFi list and status
+    wifi_list.add_flag(lv.obj.FLAG.HIDDEN)
+    status_label.add_flag(lv.obj.FLAG.HIDDEN)
+    
+    # Shrink logo
+    logo_img.set_size(150, 50)
+    logo_img.align(lv.ALIGN.TOP_MID, 0, 5)
+    
+    # Create password entry screen
+    pwd_label = lv.label(scrn)
+    pwd_label.set_text(f"WiFi: {ssid}")
+    pwd_label.align(lv.ALIGN.TOP_MID, 0, 60)
+    pwd_label.set_style_text_color(lv.color_hex(0xFFFFFF), 0)
+    pwd_label.set_style_text_font(lv.font_montserrat_14, 0)
+    
+    # Password display
+    pwd_display = lv.textarea(scrn)
+    pwd_display.set_size(400, 40)
+    pwd_display.align(lv.ALIGN.TOP_MID, 0, 85)
+    pwd_display.set_placeholder_text("Enter password...")
+    pwd_display.set_password_mode(True)
+    pwd_display.set_one_line(True)
+    
+    # Create keyboard
+    kb = lv.keyboard(scrn)
+    kb.set_size(480, 180)
+    kb.align(lv.ALIGN.BOTTOM_MID, 0, 0)
+    kb.set_textarea(pwd_display)
+    
+    def kb_event(event):
+        global selected_password
+        code = event.get_code()
+        if code == lv.EVENT.READY or code == lv.EVENT.CANCEL:
+            selected_password = pwd_display.get_text()
+            print(f"Password entered: {'*' * len(selected_password)}")
+            # Restore logo size
+            logo_img.set_zoom(256)
+            logo_img.align(lv.ALIGN.TOP_MID, 0, 10)
+            # Clean up keyboard screen
+            kb.delete()
+            pwd_display.delete()
+            pwd_label.delete()
+            # Start WiFi connection
+            connect_to_wifi(selected_ssid, selected_password)
+    
+    kb.add_event_cb(kb_event, lv.EVENT.READY, None)
+    kb.add_event_cb(kb_event, lv.EVENT.CANCEL, None)
     
     lv.task_handler()
     lv.refr_now(None)
-    sleep(1)
+
+def wifi_btn_event(event, ssid, auth):
+    print(f"Selected SSID: {ssid}, Auth: {auth}")
+    if auth > 0:  # Secured network
+        show_keyboard_screen(ssid, auth)
+    else:  # Open network
+        connect_to_wifi(ssid, "")
+
+# Add WiFi networks to list
+for net in networks_sorted[:10]:  # Show top 10 networks
+    ssid = net[0].decode('utf-8') if isinstance(net[0], bytes) else net[0]
+    rssi = net[3]
+    auth = net[4]
     
-    # Hide connection info
-    status_label.add_flag(lv.obj.FLAG.HIDDEN)
-    ssid_label.add_flag(lv.obj.FLAG.HIDDEN)
-    ip_label.add_flag(lv.obj.FLAG.HIDDEN)
+    # Create signal strength indicator
+    if rssi > -50:
+        signal = "▂▄▆█"
+    elif rssi > -60:
+        signal = "▂▄▆"
+    elif rssi > -70:
+        signal = "▂▄"
+    else:
+        signal = "▂"
     
+    # Create lock icon for secured networks
+    lock = "🔒" if auth > 0 else ""
+    
+    btn_text = f"{signal} {ssid} {lock}"
+    btn = wifi_list.add_button(None, btn_text)
+    btn.add_event_cb(lambda e, s=ssid, a=auth: wifi_btn_event(e, s, a), lv.EVENT.CLICKED, None)
+
+status_label.set_text(f"Found {len(networks)} networks")
+
+# Update display
+lv.task_handler()
+lv.refr_now(None)
+
+def connect_to_wifi(ssid, password):
+    """Connect to selected WiFi network"""
+    # Show connecting status
+    wifi_list.add_flag(lv.obj.FLAG.HIDDEN)
+    status_label.clear_flag(lv.obj.FLAG.HIDDEN)
+    status_label.set_text(f"Connecting to {ssid}...")
+    status_label.align(lv.ALIGN.CENTER, 0, 0)
+    lv.task_handler()
+    lv.refr_now(None)
+    
+    print(f"Connecting to WiFi: {ssid}")
+    print("WiFi Status Codes:")
+    print("  1000 = STAT_IDLE")
+    print("  1001 = STAT_CONNECTING") 
+    print("  1010 = STAT_GOT_IP (Connected)")
+    print("  201 = STAT_WRONG_PASSWORD")
+    print("  202 = STAT_NO_AP_FOUND")
+    print("  203 = STAT_CONNECT_FAIL")
+    print()
+    
+    wlan.connect(ssid, password)
+    
+    # Wait for connection
+    max_wait = 30
+    while max_wait > 0:
+        status = wlan.status()
+        print(f'Waiting for connection... Status: {status}')
+        
+        # Check if connected (status 1010 or 3)
+        if status == 1010 or status == 3:
+            print("Connection successful!")
+            break
+        
+        # Check if connection failed
+        if status in [201, 202, 203] or status < 0:
+            print("Connection failed!")
+            status_label.set_text(f"Failed to connect to {ssid}")
+            status_label.set_style_text_color(lv.color_hex(0xFF0000), 0)
+            lv.task_handler()
+            sleep(3)
+            # Show WiFi list again
+            wifi_list.clear_flag(lv.obj.FLAG.HIDDEN)
+            status_label.set_text(f"Found {len(networks)} networks")
+            status_label.set_style_text_color(lv.color_hex(0xFFFFFF), 0)
+            status_label.align(lv.ALIGN.TOP_MID, 0, 90)
+            return
+        
+        max_wait -= 1
+        sleep(1)
+        lv.task_handler()
+    
+    # Check connection status
+    final_status = wlan.status()
+    print(f'Final WiFi status: {final_status}')
+    
+    if final_status == 1010 or final_status == 3:
+        status_label.set_text("WiFi Connected!")
+        status_label.set_style_text_color(lv.color_hex(0x00FF00), 0)
+        ip = wlan.ifconfig()[0]
+        status_label.set_text(f"Connected! IP: {ip}")
+        print(f'Connected! IP: {ip}')
+        
+        lv.task_handler()
+        lv.refr_now(None)
+        sleep(2)
+        
+        # Hide status and continue to main app
+        status_label.add_flag(lv.obj.FLAG.HIDDEN)
+        show_main_app()
+    else:
+        status_label.set_text("Connection timeout")
+        status_label.set_style_text_color(lv.color_hex(0xFF0000), 0)
+        lv.task_handler()
+        sleep(3)
+        # Show WiFi list again
+        wifi_list.clear_flag(lv.obj.FLAG.HIDDEN)
+        status_label.set_text(f"Found {len(networks)} networks")
+        status_label.set_style_text_color(lv.color_hex(0xFFFFFF), 0)
+        status_label.align(lv.ALIGN.TOP_MID, 0, 90)
+
+def show_main_app():
+    """Show the main application after WiFi connection"""
     # Create keypad screen
     code_input = ""
     code_complete = False
@@ -324,10 +452,6 @@ if final_status == 1010 or final_status == 3:
         print(f"Error fetching/executing code: {e}")
         code_display.set_text(f"Error: {str(e)}")
         code_display.set_style_text_color(lv.color_hex(0xFF0000), 0)
-else:
-    status_label.set_text(f"Connection Failed! (Status: {final_status})")
-    status_label.set_style_text_color(lv.color_hex(0xFF0000), 0)
-    print(f'Network connection failed with status: {final_status}')
 
 lv.task_handler()
 lv.refr_now(None)

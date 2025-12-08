@@ -1,2 +1,3 @@
 run:
-	mpremote reset && sleep 2 && mpremote run semiblockFirmware.py
+	mpremote reset && sleep 2 && mpremote run semiblockFirmwareV2.py
+
