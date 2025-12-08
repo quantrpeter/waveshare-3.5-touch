@@ -77,6 +77,9 @@ display.set_rotation(lv.DISPLAY_ROTATION._90)
 display.set_color_inversion(True)
 display.set_backlight(100)
 
+# if not indev.is_calibrated:
+indev.calibrate()
+
 print("Display ready")
 
 # Initialize task handler for LVGL
@@ -457,7 +460,7 @@ lv.task_handler()
 lv.refr_now(None)
 
 # Keep display active
-print("Setup complete")
-while True:
-    lv.task_handler()
-    sleep(0.1)
+# print("Setup complete")
+# while True:
+#     lv.task_handler()
+#     sleep(0.1)
