@@ -77,8 +77,8 @@ display.set_rotation(lv.DISPLAY_ROTATION._90)
 display.set_color_inversion(True)
 display.set_backlight(100)
 
-# if not indev.is_calibrated:
-indev.calibrate()
+if not indev.is_calibrated:
+    indev.calibrate()
 
 print("Display ready")
 
@@ -216,7 +216,8 @@ for net in networks_sorted[:10]:  # Show top 10 networks
     # Create lock icon for secured networks
     lock = "🔒" if auth > 0 else ""
     
-    btn_text = f"{signal} {ssid} {lock}"
+    # btn_text = f"{signal} {ssid} {lock}"
+    btn_text = f"{ssid}"
     btn = wifi_list.add_button(None, btn_text)
     btn.add_event_cb(lambda e, s=ssid, a=auth: wifi_btn_event(e, s, a), lv.EVENT.CLICKED, None)
 
