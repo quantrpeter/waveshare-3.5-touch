@@ -473,7 +473,7 @@ lv.task_handler()
 lv.refr_now(None)
 
 # debug
-connect_to_wifi('peter 2.4G', 'peter1234')
+# connect_to_wifi('peter 2.4G', 'peter1234')
 
 # Keep display active
 # print("Setup complete")
