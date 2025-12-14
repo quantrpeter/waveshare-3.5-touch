@@ -97,7 +97,7 @@ fs_register(fs_drv, "S")
 
 # Create logo at top
 logo_img = lv.image(scrn)
-logo_img.set_src("S:semiblock.png")
+logo_img.set_src("S:semiblock_logo_2.png")
 logo_img.align(lv.ALIGN.TOP_MID, 0, 10)
 
 # Create status label
@@ -124,9 +124,9 @@ networks_sorted = sorted(networks, key=lambda x: x[3], reverse=True)
 wifi_list = lv.list(scrn)
 wifi_list.set_size(440, 200)
 wifi_list.align(lv.ALIGN.TOP_MID, 0, 120)
-wifi_list.set_style_bg_color(lv.color_hex(0x222222), 0)
+wifi_list.set_style_bg_color(lv.color_hex(0x777777), 0)
 wifi_list.set_style_border_width(2, 0)
-wifi_list.set_style_border_color(lv.color_hex(0x4CAF50), 0)
+wifi_list.set_style_border_color(lv.color_hex(0xcbb3d5), 0)
 
 selected_ssid = None
 selected_password = ""
@@ -140,8 +140,8 @@ def show_keyboard_screen(ssid, auth):
     selected_password = ""
     
     # Hide WiFi list and status
-    wifi_list.add_flag(lv.obj.FLAG.HIDDEN)
-    status_label.add_flag(lv.obj.FLAG.HIDDEN)
+    wifi_list.set_style_opa(lv.OPA.TRANSP, 0)
+    status_label.set_style_opa(lv.OPA.TRANSP, 0)
     
     # Shrink logo
     logo_img.set_size(150, 50)
@@ -174,8 +174,7 @@ def show_keyboard_screen(ssid, auth):
         if code == lv.EVENT.READY or code == lv.EVENT.CANCEL:
             selected_password = pwd_display.get_text()
             print(f"Password entered: {'*' * len(selected_password)}")
-            # Restore logo size
-            logo_img.set_zoom(256)
+            # Restore logo position
             logo_img.align(lv.ALIGN.TOP_MID, 0, 10)
             # Clean up keyboard screen
             kb.delete()
@@ -230,8 +229,8 @@ lv.refr_now(None)
 def connect_to_wifi(ssid, password):
     """Connect to selected WiFi network"""
     # Show connecting status
-    wifi_list.add_flag(lv.obj.FLAG.HIDDEN)
-    status_label.clear_flag(lv.obj.FLAG.HIDDEN)
+    wifi_list.set_style_opa(lv.OPA.TRANSP, 0)
+    status_label.set_style_opa(lv.OPA.COVER, 0)
     status_label.set_text(f"Connecting to {ssid}...")
     status_label.align(lv.ALIGN.CENTER, 0, 0)
     lv.task_handler()
@@ -268,7 +267,7 @@ def connect_to_wifi(ssid, password):
             lv.task_handler()
             sleep(3)
             # Show WiFi list again
-            wifi_list.clear_flag(lv.obj.FLAG.HIDDEN)
+            wifi_list.set_style_opa(lv.OPA.COVER, 0)
             status_label.set_text(f"Found {len(networks)} networks")
             status_label.set_style_text_color(lv.color_hex(0xFFFFFF), 0)
             status_label.align(lv.ALIGN.TOP_MID, 0, 90)
@@ -309,21 +308,34 @@ def connect_to_wifi(ssid, password):
 
 def show_main_app():
     """Show the main application after WiFi connection"""
+    # Clear screen completely
+    lv.obj.clean(scrn)
+    
+    # Disable scrolling and scrollbars
+    scrn.set_scrollbar_mode(lv.SCROLLBAR_MODE.OFF)
+    scrn.set_scroll_dir(lv.DIR.NONE)
+    
+    # Recreate logo
+    logo_img2 = lv.image(scrn)
+    logo_img2.set_src("S:semiblock.png")
+    logo_img2.align(lv.ALIGN.TOP_MID, 0, 10)
+    
     # Create keypad screen
+    global code_input, code_complete
     code_input = ""
     code_complete = False
     
     # Create display label for entered code
     code_display = lv.label(scrn)
     code_display.set_text("Enter 4-digit code:")
-    code_display.align(lv.ALIGN.TOP_MID, 0, 100)
+    code_display.align(lv.ALIGN.TOP_MID, 0, 75)
     code_display.set_style_text_color(lv.color_hex(0xFFFFFF), 0)
     code_display.set_style_text_font(lv.font_montserrat_16, 0)
     
     code_label = lv.label(scrn)
     code_label.set_text("____")
-    code_label.align(lv.ALIGN.TOP_MID, 0, 140)
-    code_label.set_style_text_color(lv.color_hex(0x00FF00), 0)
+    code_label.align(lv.ALIGN.TOP_MID, 120, 75)
+    code_label.set_style_text_color(lv.color_hex(0xffffff), 0)
     code_label.set_style_text_font(lv.font_montserrat_16, 0)
     
     # Button event handlers
@@ -352,7 +364,7 @@ def show_main_app():
     
     # Create number buttons (3x4 grid)
     btn_width = 70
-    btn_height = 50
+    btn_height = 40
     btn_spacing = 8
     start_x = (480 - (3 * btn_width + 2 * btn_spacing)) // 2
     start_y = 100
@@ -460,8 +472,11 @@ def show_main_app():
 lv.task_handler()
 lv.refr_now(None)
 
+# debug
+connect_to_wifi('peter 2.4G', 'peter1234')
+
 # Keep display active
 # print("Setup complete")
-# while True:
+while True:
 #     lv.task_handler()
-#     sleep(0.1)
+    sleep(0.1)
