@@ -83,9 +83,9 @@ scrn = lv.screen_active()
 scrn.set_style_bg_color(lv.color_hex(0x000000), 0)  # Black background
 
 # Game constants
-GRID_SIZE = 15
-GRID_WIDTH = 24
-GRID_HEIGHT = 20
+GRID_SIZE = 13
+GRID_WIDTH = 20
+GRID_HEIGHT = 22
 CELL_SIZE = GRID_SIZE
 
 # Game variables
@@ -100,7 +100,7 @@ game_speed = 200  # milliseconds per move
 # Create game area background
 game_area = lv.obj(scrn)
 game_area.set_size(GRID_WIDTH * GRID_SIZE, GRID_HEIGHT * GRID_SIZE)
-game_area.align(lv.ALIGN.TOP_MID, 0, 10)
+game_area.align(lv.ALIGN.TOP_LEFT, 10, 10)
 game_area.set_style_bg_color(lv.color_hex(0x003300), 0)
 game_area.set_style_border_width(2, 0)
 game_area.set_style_border_color(lv.color_hex(0x00FF00), 0)
@@ -113,25 +113,25 @@ food_object = None
 # Score label
 score_label = lv.label(scrn)
 score_label.set_text(f"Score: {score}")
-score_label.align(lv.ALIGN.TOP_LEFT, 10, 200)
+score_label.align(lv.ALIGN.TOP_LEFT, 280, 20)
 score_label.set_style_text_color(lv.color_hex(0xFFFFFF), 0)
 score_label.set_style_text_font(lv.font_montserrat_16, 0)
 
 # Game over label (hidden initially)
 game_over_label = lv.label(scrn)
 game_over_label.set_text("GAME OVER!")
-game_over_label.align(lv.ALIGN.TOP_MID, 0, 260)
+game_over_label.align(lv.ALIGN.CENTER, 0, -30)
 game_over_label.set_style_text_color(lv.color_hex(0xFF0000), 0)
 game_over_label.set_style_text_font(lv.font_montserrat_16, 0)
 game_over_label.add_flag(lv.obj.FLAG.HIDDEN)
 
 # Control buttons
-btn_size = 60
+btn_size = 50
 
 # Up button
 btn_up = lv.button(scrn)
 btn_up.set_size(btn_size, btn_size)
-btn_up.set_pos(390, 50)
+btn_up.set_pos(320, 60)
 btn_up.set_style_bg_color(lv.color_hex(0x4444FF), 0)
 label_up = lv.label(btn_up)
 label_up.set_text("▲")
@@ -141,7 +141,7 @@ label_up.center()
 # Down button
 btn_down = lv.button(scrn)
 btn_down.set_size(btn_size, btn_size)
-btn_down.set_pos(390, 170)
+btn_down.set_pos(320, 170)
 btn_down.set_style_bg_color(lv.color_hex(0x4444FF), 0)
 label_down = lv.label(btn_down)
 label_down.set_text("▼")
@@ -151,7 +151,7 @@ label_down.center()
 # Left button
 btn_left = lv.button(scrn)
 btn_left.set_size(btn_size, btn_size)
-btn_left.set_pos(330, 110)
+btn_left.set_pos(265, 115)
 btn_left.set_style_bg_color(lv.color_hex(0x4444FF), 0)
 label_left = lv.label(btn_left)
 label_left.set_text("◄")
@@ -161,7 +161,7 @@ label_left.center()
 # Right button
 btn_right = lv.button(scrn)
 btn_right.set_size(btn_size, btn_size)
-btn_right.set_pos(450, 110)
+btn_right.set_pos(375, 115)
 btn_right.set_style_bg_color(lv.color_hex(0x4444FF), 0)
 label_right = lv.label(btn_right)
 label_right.set_text("►")
@@ -171,7 +171,7 @@ label_right.center()
 # Restart button
 btn_restart = lv.button(scrn)
 btn_restart.set_size(100, 40)
-btn_restart.set_pos(370, 250)
+btn_restart.set_pos(295, 240)
 btn_restart.set_style_bg_color(lv.color_hex(0xFF4444), 0)
 label_restart = lv.label(btn_restart)
 label_restart.set_text("RESTART")
@@ -269,13 +269,13 @@ def update_game():
     if (new_head[0] < 0 or new_head[0] >= GRID_WIDTH or
         new_head[1] < 0 or new_head[1] >= GRID_HEIGHT):
         game_over = True
-        game_over_label.clear_flag(lv.obj.FLAG.HIDDEN)
+        game_over_label.set_style_opa(lv.OPA.COVER, 0)
         return
     
     # Check self collision
     if new_head in snake:
         game_over = True
-        game_over_label.clear_flag(lv.obj.FLAG.HIDDEN)
+        game_over_label.set_style_opa(lv.OPA.COVER, 0)
         return
     
     # Add new head
