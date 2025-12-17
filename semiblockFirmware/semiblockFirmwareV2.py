@@ -124,9 +124,18 @@ networks_sorted = sorted(networks, key=lambda x: x[3], reverse=True)
 wifi_list = lv.list(scrn)
 wifi_list.set_size(440, 200)
 wifi_list.align(lv.ALIGN.TOP_MID, 0, 120)
-wifi_list.set_style_bg_color(lv.color_hex(0x777777), 0)
-wifi_list.set_style_border_width(2, 0)
+wifi_list.set_style_bg_color(lv.color_hex(0xaaaaaa), 0)
+wifi_list.set_style_border_width(3, 0)
 wifi_list.set_style_border_color(lv.color_hex(0xcbb3d5), 0)
+
+# Create refresh button
+refresh_btn = lv.button(scrn)
+refresh_btn.set_size(120, 35)
+refresh_btn.align(lv.ALIGN.TOP_MID, 0, 325)
+refresh_btn.set_style_bg_color(lv.color_hex(0x4444FF), 0)
+refresh_btn_label = lv.label(refresh_btn)
+refresh_btn_label.set_text("Refresh")
+refresh_btn_label.center()
 
 selected_ssid = None
 selected_password = ""
@@ -162,11 +171,41 @@ def show_keyboard_screen(ssid, auth):
     pwd_display.set_password_mode(True)
     pwd_display.set_one_line(True)
     
+    # Create back button
+    back_btn = lv.button(scrn)
+    back_btn.set_size(80, 35)
+    back_btn.align(lv.ALIGN.TOP_LEFT, 10, 10)
+    back_btn.set_style_bg_color(lv.color_hex(0x666666), 0)
+    back_btn_label = lv.label(back_btn)
+    back_btn_label.set_text("Back")
+    back_btn_label.center()
+    
     # Create keyboard
     kb = lv.keyboard(scrn)
     kb.set_size(480, 180)
     kb.align(lv.ALIGN.BOTTOM_MID, 0, 0)
     kb.set_textarea(pwd_display)
+    
+    def back_btn_event(event):
+        """Handle back button click"""
+        print("Back button clicked - returning to WiFi list")
+        # Restore logo position and size
+        logo_img.set_size(lv.SIZE_CONTENT, lv.SIZE_CONTENT)
+        logo_img.align(lv.ALIGN.TOP_MID, 0, 10)
+        # Hide and clean up keyboard screen
+        kb.add_flag(lv.obj.FLAG.HIDDEN)
+        kb.delete()
+        pwd_display.delete()
+        pwd_label.delete()
+        back_btn.delete()
+        # Show WiFi list and status again
+        wifi_list.set_style_opa(lv.OPA.COVER, 0)
+        status_label.set_style_opa(lv.OPA.COVER, 0)
+        status_label.align(lv.ALIGN.TOP_MID, 0, 90)
+        lv.task_handler()
+        lv.refr_now(None)
+    
+    back_btn.add_event_cb(back_btn_event, lv.EVENT.CLICKED, None)
     
     def kb_event(event):
         global selected_password
@@ -174,12 +213,14 @@ def show_keyboard_screen(ssid, auth):
         if code == lv.EVENT.READY or code == lv.EVENT.CANCEL:
             selected_password = pwd_display.get_text()
             print(f"Password entered: {'*' * len(selected_password)}")
-            # Restore logo position
+            # Restore logo position and size
+            logo_img.set_size(lv.SIZE_CONTENT, lv.SIZE_CONTENT)
             logo_img.align(lv.ALIGN.TOP_MID, 0, 10)
             # Clean up keyboard screen
             kb.delete()
             pwd_display.delete()
             pwd_label.delete()
+            back_btn.delete()
             # Start WiFi connection
             connect_to_wifi(selected_ssid, selected_password)
     
@@ -196,31 +237,75 @@ def wifi_btn_event(event, ssid, auth):
     else:  # Open network
         connect_to_wifi(ssid, "")
 
-# Add WiFi networks to list
-for net in networks_sorted[:10]:  # Show top 10 networks
-    ssid = net[0].decode('utf-8') if isinstance(net[0], bytes) else net[0]
-    rssi = net[3]
-    auth = net[4]
+def populate_wifi_list(networks_list):
+    """Populate the WiFi list with scanned networks"""
+    # Clear existing items
+    wifi_list.clean()
     
-    # Create signal strength indicator
-    if rssi > -50:
-        signal = "▂▄▆█"
-    elif rssi > -60:
-        signal = "▂▄▆"
-    elif rssi > -70:
-        signal = "▂▄"
-    else:
-        signal = "▂"
+    # Sort by signal strength (RSSI)
+    networks_sorted = sorted(networks_list, key=lambda x: x[3], reverse=True)
     
-    # Create lock icon for secured networks
-    lock = "🔒" if auth > 0 else ""
+    # Add WiFi networks to list
+    seen_ssids = set()  # Track SSIDs we've already added
+    for net in networks_sorted[:20]:  # Check more networks to get 10 unique ones
+        ssid = net[0].decode('utf-8') if isinstance(net[0], bytes) else net[0]
+        
+        # Skip if we've already added this SSID
+        if ssid in seen_ssids:
+            continue
+        
+        seen_ssids.add(ssid)
+        
+        # Stop after adding 10 unique networks
+        if len(seen_ssids) > 10:
+            break
+        
+        rssi = net[3]
+        auth = net[4]
+        
+        # Create signal strength indicator
+        if rssi > -50:
+            signal = "▂▄▆█"
+        elif rssi > -60:
+            signal = "▂▄▆"
+        elif rssi > -70:
+            signal = "▂▄"
+        else:
+            signal = "▂"
+        
+        # Create lock icon for secured networks
+        lock = "🔒" if auth > 0 else ""
+        
+        # btn_text = f"{signal} {ssid} {lock}"
+        btn_text = f"{ssid}"
+        btn = wifi_list.add_button(None, btn_text)
+        btn.add_event_cb(lambda e, s=ssid, a=auth: wifi_btn_event(e, s, a), lv.EVENT.CLICKED, None)
+        btn.set_style_bg_color(lv.color_hex(0xaaaaaa), 0)
     
-    # btn_text = f"{signal} {ssid} {lock}"
-    btn_text = f"{ssid}"
-    btn = wifi_list.add_button(None, btn_text)
-    btn.add_event_cb(lambda e, s=ssid, a=auth: wifi_btn_event(e, s, a), lv.EVENT.CLICKED, None)
+    status_label.set_text(f"Found {len(networks_list)} networks")
+    lv.task_handler()
+    lv.refr_now(None)
 
-status_label.set_text(f"Found {len(networks)} networks")
+def refresh_wifi_list(event):
+    """Rescan WiFi networks and refresh the list"""
+    print("Refreshing WiFi list...")
+    status_label.set_text("Scanning WiFi...")
+    lv.task_handler()
+    lv.refr_now(None)
+    
+    # Rescan networks
+    global networks, networks_sorted
+    networks = wlan.scan()
+    networks_sorted = sorted(networks, key=lambda x: x[3], reverse=True)
+    
+    # Repopulate the list
+    populate_wifi_list(networks)
+    print(f"Found {len(networks)} networks")
+
+refresh_btn.add_event_cb(refresh_wifi_list, lv.EVENT.CLICKED, None)
+
+# Initial population of WiFi list
+populate_wifi_list(networks)
 
 # Update display
 lv.task_handler()
