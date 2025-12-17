@@ -131,40 +131,40 @@ btn_size = 50
 # Up button
 btn_up = lv.button(scrn)
 btn_up.set_size(btn_size, btn_size)
-btn_up.set_pos(320, 60)
+btn_up.set_pos(340, 60)
 btn_up.set_style_bg_color(lv.color_hex(0x4444FF), 0)
 label_up = lv.label(btn_up)
-label_up.set_text("▲")
+label_up.set_text("up")
 label_up.set_style_text_font(lv.font_montserrat_16, 0)
 label_up.center()
 
 # Down button
 btn_down = lv.button(scrn)
 btn_down.set_size(btn_size, btn_size)
-btn_down.set_pos(320, 170)
+btn_down.set_pos(340, 170)
 btn_down.set_style_bg_color(lv.color_hex(0x4444FF), 0)
 label_down = lv.label(btn_down)
-label_down.set_text("▼")
+label_down.set_text("dn")
 label_down.set_style_text_font(lv.font_montserrat_16, 0)
 label_down.center()
 
 # Left button
 btn_left = lv.button(scrn)
 btn_left.set_size(btn_size, btn_size)
-btn_left.set_pos(265, 115)
+btn_left.set_pos(285, 115)
 btn_left.set_style_bg_color(lv.color_hex(0x4444FF), 0)
 label_left = lv.label(btn_left)
-label_left.set_text("◄")
+label_left.set_text("<")
 label_left.set_style_text_font(lv.font_montserrat_16, 0)
 label_left.center()
 
 # Right button
 btn_right = lv.button(scrn)
 btn_right.set_size(btn_size, btn_size)
-btn_right.set_pos(375, 115)
+btn_right.set_pos(395, 115)
 btn_right.set_style_bg_color(lv.color_hex(0x4444FF), 0)
 label_right = lv.label(btn_right)
-label_right.set_text("►")
+label_right.set_text(">")
 label_right.set_style_text_font(lv.font_montserrat_16, 0)
 label_right.center()
 
