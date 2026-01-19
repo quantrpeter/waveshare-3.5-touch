@@ -1,4 +1,5 @@
 upload:
+	mpremote cp semiblock.png :
 	mpremote cp semiblock_logo_2.png :
 
 run:
