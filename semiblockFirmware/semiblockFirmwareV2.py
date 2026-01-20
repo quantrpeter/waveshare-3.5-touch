@@ -1,6 +1,6 @@
 import lcd_bus
 import machine
-from time import sleep
+from time import sleep, sleep_ms, sleep_us
 import st7796
 import lvgl as lv
 import i2c
@@ -9,6 +9,25 @@ import pointer_framework
 import task_handler
 import network
 from fs_driver import fs_register
+import os
+
+# Check if user app exists and run it instead of firmware UI
+try:
+    if 'user_app.py' in os.listdir():
+        print("Found user_app.py - running user application...")
+        with open('user_app.py', 'r') as f:
+            user_code = f.read()
+        # Delete the file so next boot returns to firmware UI
+        os.remove('user_app.py')
+        print("Deleted user_app.py - next boot will show firmware UI")
+        # Execute user code
+        exec(user_code)
+        # If user code finishes, just hang
+        while True:
+            sleep(1)
+except Exception as e:
+    print(f"Error checking/running user_app.py: {e}")
+    # Continue to firmware UI on error
 
 # Display settings for Waveshare ESP32-S3-Touch-LCD-3.5
 _WIDTH = 320
@@ -31,9 +50,12 @@ _TOUCH_I2C_ADDR = 0x38
 _TOUCH_INT = 4
 _TOUCH_RST = None
 
-# # WiFi credentials
-# SSID = "peter 2.4G"
-# PASSWORD = "peter1234"
+# Debug mode - set to True to skip WiFi selection UI
+DEBUG = True
+DEBUG_SSID = "Quantr 2.4G"
+DEBUG_PASSWORD = "quantrwifi"
+
+# WiFi credentials (used when not in debug mode)
 SSID = "perfect group"
 PASSWORD = "LanghamPlace51#"
 
@@ -111,35 +133,335 @@ status_label.set_style_text_font(lv.font_montserrat_14, 0)
 lv.task_handler()
 lv.refr_now(None)
 
-# Scan WiFi networks
-print("Scanning WiFi networks...")
+# Define show_main_app function before connect_to_wifi (which calls it)
+def show_main_app():
+    """Show the main application after WiFi connection"""
+    # Clear screen completely
+    lv.obj.clean(scrn)
+    
+    # Disable scrolling and scrollbars
+    scrn.set_scrollbar_mode(lv.SCROLLBAR_MODE.OFF)
+    scrn.set_scroll_dir(lv.DIR.NONE)
+    
+    # Recreate logo
+    logo_img2 = lv.image(scrn)
+    logo_img2.set_src("S:semiblock.png")
+    logo_img2.align(lv.ALIGN.TOP_MID, 0, 10)
+    
+    # Create keypad screen
+    global code_input, code_complete
+    code_input = ""
+    code_complete = False
+    
+    # Create display label for entered code
+    code_display = lv.label(scrn)
+    code_display.set_text("Enter 4-digit code:")
+    code_display.align(lv.ALIGN.TOP_MID, 0, 75)
+    code_display.set_style_text_color(lv.color_hex(0xFFFFFF), 0)
+    code_display.set_style_text_font(lv.font_montserrat_16, 0)
+    
+    code_label = lv.label(scrn)
+    code_label.set_text("____")
+    code_label.align(lv.ALIGN.TOP_MID, 120, 75)
+    code_label.set_style_text_color(lv.color_hex(0xffffff), 0)
+    code_label.set_style_text_font(lv.font_montserrat_16, 0)
+    
+    # Button event handlers
+    def num_btn_event_with_num(event, num):
+        global code_input
+        if len(code_input) < 4:
+            code_input += str(num)
+            display_text = code_input + "_" * (4 - len(code_input))
+            code_label.set_text(display_text)
+            print(f"Code: {code_input}")
+    
+    def clear_btn_event(event):
+        global code_input
+        code_input = ""
+        code_label.set_text("____")
+        print("Code cleared")
+    
+    def enter_btn_event(event):
+        global code_input, code_complete
+        print(f"Enter button pressed! Code length: {len(code_input)}")
+        if len(code_input) == 4:
+            code_complete = True
+            print(f"Code entered: {code_input}")
+        else:
+            print(f"Need 4 digits, only have {len(code_input)}")
+    
+    # Create number buttons (3x4 grid)
+    btn_width = 70
+    btn_height = 40
+    btn_spacing = 8
+    start_x = (480 - (3 * btn_width + 2 * btn_spacing)) // 2
+    start_y = 100
+    
+    buttons = []
+    for i in range(1, 10):
+        row = (i - 1) // 3
+        col = (i - 1) % 3
+        
+        btn = lv.button(scrn)
+        btn.set_size(btn_width, btn_height)
+        btn.set_pos(start_x + col * (btn_width + btn_spacing), 
+                   start_y + row * (btn_height + btn_spacing))
+        btn.set_style_bg_color(lv.color_hex(0x4444FF), 0)
+        
+        label = lv.label(btn)
+        label.set_text(str(i))
+        label.set_style_text_font(lv.font_montserrat_16, 0)
+        label.center()
+        
+        # Use lambda with default argument to capture the value
+        btn.add_event_cb(lambda e, num=i: num_btn_event_with_num(e, num), lv.EVENT.CLICKED, None)
+        buttons.append(btn)
+    
+    # Button 0
+    btn_0 = lv.button(scrn)
+    btn_0.set_size(btn_width, btn_height)
+    btn_0.set_pos(start_x + btn_width + btn_spacing, 
+                 start_y + 3 * (btn_height + btn_spacing))
+    btn_0.set_style_bg_color(lv.color_hex(0x4444FF), 0)
+    
+    label_0 = lv.label(btn_0)
+    label_0.set_text("0")
+    label_0.set_style_text_font(lv.font_montserrat_16, 0)
+    label_0.center()
+    
+    btn_0.add_event_cb(lambda e: num_btn_event_with_num(e, 0), lv.EVENT.CLICKED, None)
+    
+    # Clear button
+    btn_clear = lv.button(scrn)
+    btn_clear.set_size(btn_width, btn_height)
+    btn_clear.set_pos(start_x, start_y + 3 * (btn_height + btn_spacing))
+    btn_clear.set_style_bg_color(lv.color_hex(0xFF4444), 0)
+    
+    label_clear = lv.label(btn_clear)
+    label_clear.set_text("CLR")
+    label_clear.set_style_text_font(lv.font_montserrat_16, 0)
+    label_clear.center()
+    
+    btn_clear.add_event_cb(clear_btn_event, lv.EVENT.CLICKED, None)
+    
+    # Enter button
+    btn_enter = lv.button(scrn)
+    btn_enter.set_size(btn_width, btn_height)
+    btn_enter.set_pos(start_x + 2 * (btn_width + btn_spacing), 
+                     start_y + 3 * (btn_height + btn_spacing))
+    btn_enter.set_style_bg_color(lv.color_hex(0x44FF44), 0)
+    
+    label_enter = lv.label(btn_enter)
+    label_enter.set_text("OK")
+    label_enter.set_style_text_font(lv.font_montserrat_16, 0)
+    label_enter.center()
+    
+    btn_enter.add_event_cb(enter_btn_event, lv.EVENT.CLICKED, None)
+    btn_enter.add_event_cb(enter_btn_event, lv.EVENT.PRESSED, None)
+    
+    lv.task_handler()
+    lv.refr_now(None)
+    
+    # Wait for code entry
+    print("Waiting for 4-digit code...")
+    while not code_complete:
+        lv.task_handler()
+        sleep(0.05)
+    
+    # Code entered, fetch from server
+    print(f"Fetching code with: {code_input}")
+    code_display.set_text("Fetching code...")
+    lv.task_handler()
+    
+    try:
+        import urequests
+        import ubinascii
+        url = f"https://build.semiblock.ai/api/getProject?deviceCode={code_input}"
+        print(f"URL: {url}")
+        response = urequests.get(url)
+        if response.status_code == 200:
+            response_json = response.json()
+            if response_json.get('success') and 'data' in response_json:
+                code = response_json['data']['code']
+                images = response_json['data'].get('images', [])
+                
+                print(f"Code received ({len(code)} bytes)")
+                print(f"Images received: {len(images)}")
+                
+                # Download and save images first
+                if images:
+                    code_display.set_text(f"Downloading {len(images)} images...")
+                    lv.task_handler()
+                    
+                    for idx, img in enumerate(images):
+                        img_name = img['name']
+                        img_data = img['image_data']
+                        
+                        print(f"Saving {img_name}.png ({idx+1}/{len(images)})...")
+                        code_display.set_text(f"Saving {img_name}.png...")
+                        lv.task_handler()
+                        
+                        try:
+                            # Remove data:image/png;base64, prefix if present
+                            if img_data.startswith('data:'):
+                                img_data = img_data.split(',', 1)[1]
+                            
+                            # Decode base64 to binary
+                            img_binary = ubinascii.a2b_base64(img_data)
+                            
+                            # Save as PNG file
+                            with open(f"{img_name}.png", 'wb') as f:
+                                f.write(img_binary)
+                            print(f"Saved {img_name}.png")
+                        except Exception as img_error:
+                            print(f"Failed to save {img_name}.png: {img_error}")
+                
+                code_display.set_text("Saving code...")
+                lv.task_handler()
+                
+                # Save code to file
+                try:
+                    with open('user_app.py', 'w') as f:
+                        f.write(code)
+                    print("Code saved to user_app.py")
+                    code_display.set_text("Rebooting...")
+                    lv.task_handler()
+                    sleep(1)
+                    
+                    # Reset to run the new code
+                    machine.reset()
+                except Exception as write_error:
+                    print(f"Failed to save code: {write_error}")
+                    code_display.set_text(f"Save error: {str(write_error)}")
+                    code_display.set_style_text_color(lv.color_hex(0xFF0000), 0)
+            else:
+                print(f"Invalid response format: {response.text}")
+                code_display.set_text("Invalid response format")
+                code_display.set_style_text_color(lv.color_hex(0xFF0000), 0)
+        else:
+            print(f"Failed to fetch code: HTTP {response.status_code}")
+            code_display.set_text(f"Fetch failed: {response.status_code}")
+            code_display.set_style_text_color(lv.color_hex(0xFF0000), 0)
+        response.close()
+    except Exception as e:
+        import sys
+        sys.print_exception(e)
+        print(f"Error fetching/executing code: {e}")
+        # Don't try to update UI after exec error - objects may be deleted
+        # Just print error and continue
+
+# Define connect_to_wifi function before it's used
+def connect_to_wifi(ssid, password):
+    """Connect to selected WiFi network"""
+    # Show connecting status
+    status_label.set_style_opa(lv.OPA.COVER, 0)
+    status_label.set_text(f"Connecting to {ssid}...")
+    status_label.align(lv.ALIGN.CENTER, 0, 0)
+    lv.task_handler()
+    lv.refr_now(None)
+    
+    print(f"Connecting to WiFi: {ssid}")
+    print("WiFi Status Codes:")
+    print("  1000 = STAT_IDLE")
+    print("  1001 = STAT_CONNECTING") 
+    print("  1010 = STAT_GOT_IP (Connected)")
+    print("  201 = STAT_WRONG_PASSWORD")
+    print("  202 = STAT_NO_AP_FOUND")
+    print("  203 = STAT_CONNECT_FAIL")
+    print()
+    
+    wlan.connect(ssid, password)
+    
+    # Wait for connection
+    max_wait = 30
+    while max_wait > 0:
+        status = wlan.status()
+        print(f'Waiting for connection... Status: {status}')
+        
+        # Check if connected (status 1010 or 3)
+        if status == 1010 or status == 3:
+            print("Connection successful!")
+            break
+        
+        # Check if connection failed
+        if status in [201, 202, 203] or status < 0:
+            print("Connection failed!")
+            status_label.set_text(f"Failed to connect to {ssid}")
+            status_label.set_style_text_color(lv.color_hex(0xFF0000), 0)
+            lv.task_handler()
+            sleep(3)
+            return
+        
+        max_wait -= 1
+        sleep(1)
+        lv.task_handler()
+    
+    # Check connection status
+    final_status = wlan.status()
+    print(f'Final WiFi status: {final_status}')
+    
+    if final_status == 1010 or final_status == 3:
+        status_label.set_text("WiFi Connected!")
+        status_label.set_style_text_color(lv.color_hex(0x00FF00), 0)
+        ip = wlan.ifconfig()[0]
+        status_label.set_text(f"Connected! IP: {ip}")
+        print(f'Connected! IP: {ip}')
+        
+        lv.task_handler()
+        lv.refr_now(None)
+        sleep(2)
+        
+        # Hide status and continue to main app
+        status_label.add_flag(lv.obj.FLAG.HIDDEN)
+        show_main_app()
+    else:
+        status_label.set_text("Connection timeout")
+        status_label.set_style_text_color(lv.color_hex(0xFF0000), 0)
+        lv.task_handler()
+        sleep(3)
+
+# Initialize WiFi
 wlan = network.WLAN(network.STA_IF)
 wlan.active(True)
-networks = wlan.scan()
 
-# Sort by signal strength (RSSI)
-networks_sorted = sorted(networks, key=lambda x: x[3], reverse=True)
+# Debug mode - skip WiFi selection UI
+if DEBUG:
+    print("DEBUG MODE: Auto-connecting to WiFi...")
+    status_label.set_text(f"DEBUG: Connecting to {DEBUG_SSID}...")
+    lv.task_handler()
+    lv.refr_now(None)
+    connect_to_wifi(DEBUG_SSID, DEBUG_PASSWORD)
+    # Script continues from show_main_app() after connection
+else:
+    # Scan WiFi networks
+    print("Scanning WiFi networks...")
+    status_label.set_text("Scanning WiFi networks...")
+    networks = wlan.scan()
+    
+    # Sort by signal strength (RSSI)
+    networks_sorted = sorted(networks, key=lambda x: x[3], reverse=True)
+    
+    # Create scrollable list for WiFi networks
+    wifi_list = lv.list(scrn)
+    wifi_list.set_size(440, 200)
+    wifi_list.align(lv.ALIGN.TOP_MID, 0, 120)
+    wifi_list.set_style_bg_color(lv.color_hex(0xaaaaaa), 0)
+    wifi_list.set_style_border_width(3, 0)
+    wifi_list.set_style_border_color(lv.color_hex(0xcbb3d5), 0)
+    
+    # Create refresh button
+    refresh_btn = lv.button(scrn)
+    refresh_btn.set_size(120, 35)
+    refresh_btn.align(lv.ALIGN.TOP_MID, 0, 325)
+    refresh_btn.set_style_bg_color(lv.color_hex(0x4444FF), 0)
+    refresh_btn_label = lv.label(refresh_btn)
+    refresh_btn_label.set_text("Refresh")
+    refresh_btn_label.center()
 
-# Create scrollable list for WiFi networks
-wifi_list = lv.list(scrn)
-wifi_list.set_size(440, 200)
-wifi_list.align(lv.ALIGN.TOP_MID, 0, 120)
-wifi_list.set_style_bg_color(lv.color_hex(0xaaaaaa), 0)
-wifi_list.set_style_border_width(3, 0)
-wifi_list.set_style_border_color(lv.color_hex(0xcbb3d5), 0)
-
-# Create refresh button
-refresh_btn = lv.button(scrn)
-refresh_btn.set_size(120, 35)
-refresh_btn.align(lv.ALIGN.TOP_MID, 0, 325)
-refresh_btn.set_style_bg_color(lv.color_hex(0x4444FF), 0)
-refresh_btn_label = lv.label(refresh_btn)
-refresh_btn_label.set_text("Refresh")
-refresh_btn_label.center()
-
-selected_ssid = None
-selected_password = ""
-selected_auth = 0
+if not DEBUG:
+    selected_ssid = None
+    selected_password = ""
+    selected_auth = 0
 
 def show_keyboard_screen(ssid, auth):
     """Show password entry keyboard screen"""
@@ -302,257 +624,15 @@ def refresh_wifi_list(event):
     populate_wifi_list(networks)
     print(f"Found {len(networks)} networks")
 
-refresh_btn.add_event_cb(refresh_wifi_list, lv.EVENT.CLICKED, None)
-
-# Initial population of WiFi list
-populate_wifi_list(networks)
-
-# Update display
-lv.task_handler()
-lv.refr_now(None)
-
-def connect_to_wifi(ssid, password):
-    """Connect to selected WiFi network"""
-    # Show connecting status
-    wifi_list.set_style_opa(lv.OPA.TRANSP, 0)
-    status_label.set_style_opa(lv.OPA.COVER, 0)
-    status_label.set_text(f"Connecting to {ssid}...")
-    status_label.align(lv.ALIGN.CENTER, 0, 0)
+if not DEBUG:
+    refresh_btn.add_event_cb(refresh_wifi_list, lv.EVENT.CLICKED, None)
+    
+    # Initial population of WiFi list
+    populate_wifi_list(networks)
+    
+    # Update display
     lv.task_handler()
     lv.refr_now(None)
-    
-    print(f"Connecting to WiFi: {ssid}")
-    print("WiFi Status Codes:")
-    print("  1000 = STAT_IDLE")
-    print("  1001 = STAT_CONNECTING") 
-    print("  1010 = STAT_GOT_IP (Connected)")
-    print("  201 = STAT_WRONG_PASSWORD")
-    print("  202 = STAT_NO_AP_FOUND")
-    print("  203 = STAT_CONNECT_FAIL")
-    print()
-    
-    wlan.connect(ssid, password)
-    
-    # Wait for connection
-    max_wait = 30
-    while max_wait > 0:
-        status = wlan.status()
-        print(f'Waiting for connection... Status: {status}')
-        
-        # Check if connected (status 1010 or 3)
-        if status == 1010 or status == 3:
-            print("Connection successful!")
-            break
-        
-        # Check if connection failed
-        if status in [201, 202, 203] or status < 0:
-            print("Connection failed!")
-            status_label.set_text(f"Failed to connect to {ssid}")
-            status_label.set_style_text_color(lv.color_hex(0xFF0000), 0)
-            lv.task_handler()
-            sleep(3)
-            # Show WiFi list again
-            wifi_list.set_style_opa(lv.OPA.COVER, 0)
-            status_label.set_text(f"Found {len(networks)} networks")
-            status_label.set_style_text_color(lv.color_hex(0xFFFFFF), 0)
-            status_label.align(lv.ALIGN.TOP_MID, 0, 90)
-            return
-        
-        max_wait -= 1
-        sleep(1)
-        lv.task_handler()
-    
-    # Check connection status
-    final_status = wlan.status()
-    print(f'Final WiFi status: {final_status}')
-    
-    if final_status == 1010 or final_status == 3:
-        status_label.set_text("WiFi Connected!")
-        status_label.set_style_text_color(lv.color_hex(0x00FF00), 0)
-        ip = wlan.ifconfig()[0]
-        status_label.set_text(f"Connected! IP: {ip}")
-        print(f'Connected! IP: {ip}')
-        
-        lv.task_handler()
-        lv.refr_now(None)
-        sleep(2)
-        
-        # Hide status and continue to main app
-        status_label.add_flag(lv.obj.FLAG.HIDDEN)
-        show_main_app()
-    else:
-        status_label.set_text("Connection timeout")
-        status_label.set_style_text_color(lv.color_hex(0xFF0000), 0)
-        lv.task_handler()
-        sleep(3)
-        # Show WiFi list again
-        wifi_list.clear_flag(lv.obj.FLAG.HIDDEN)
-        status_label.set_text(f"Found {len(networks)} networks")
-        status_label.set_style_text_color(lv.color_hex(0xFFFFFF), 0)
-        status_label.align(lv.ALIGN.TOP_MID, 0, 90)
-
-def show_main_app():
-    """Show the main application after WiFi connection"""
-    # Clear screen completely
-    lv.obj.clean(scrn)
-    
-    # Disable scrolling and scrollbars
-    scrn.set_scrollbar_mode(lv.SCROLLBAR_MODE.OFF)
-    scrn.set_scroll_dir(lv.DIR.NONE)
-    
-    # Recreate logo
-    logo_img2 = lv.image(scrn)
-    logo_img2.set_src("S:semiblock.png")
-    logo_img2.align(lv.ALIGN.TOP_MID, 0, 10)
-    
-    # Create keypad screen
-    global code_input, code_complete
-    code_input = ""
-    code_complete = False
-    
-    # Create display label for entered code
-    code_display = lv.label(scrn)
-    code_display.set_text("Enter 4-digit code:")
-    code_display.align(lv.ALIGN.TOP_MID, 0, 75)
-    code_display.set_style_text_color(lv.color_hex(0xFFFFFF), 0)
-    code_display.set_style_text_font(lv.font_montserrat_16, 0)
-    
-    code_label = lv.label(scrn)
-    code_label.set_text("____")
-    code_label.align(lv.ALIGN.TOP_MID, 120, 75)
-    code_label.set_style_text_color(lv.color_hex(0xffffff), 0)
-    code_label.set_style_text_font(lv.font_montserrat_16, 0)
-    
-    # Button event handlers
-    def num_btn_event_with_num(event, num):
-        global code_input
-        if len(code_input) < 4:
-            code_input += str(num)
-            display_text = code_input + "_" * (4 - len(code_input))
-            code_label.set_text(display_text)
-            print(f"Code: {code_input}")
-    
-    def clear_btn_event(event):
-        global code_input
-        code_input = ""
-        code_label.set_text("____")
-        print("Code cleared")
-    
-    def enter_btn_event(event):
-        global code_input, code_complete
-        print(f"Enter button pressed! Code length: {len(code_input)}")
-        if len(code_input) == 4:
-            code_complete = True
-            print(f"Code entered: {code_input}")
-        else:
-            print(f"Need 4 digits, only have {len(code_input)}")
-    
-    # Create number buttons (3x4 grid)
-    btn_width = 70
-    btn_height = 40
-    btn_spacing = 8
-    start_x = (480 - (3 * btn_width + 2 * btn_spacing)) // 2
-    start_y = 100
-    
-    buttons = []
-    for i in range(1, 10):
-        row = (i - 1) // 3
-        col = (i - 1) % 3
-        
-        btn = lv.button(scrn)
-        btn.set_size(btn_width, btn_height)
-        btn.set_pos(start_x + col * (btn_width + btn_spacing), 
-                   start_y + row * (btn_height + btn_spacing))
-        btn.set_style_bg_color(lv.color_hex(0x4444FF), 0)
-        
-        label = lv.label(btn)
-        label.set_text(str(i))
-        label.set_style_text_font(lv.font_montserrat_16, 0)
-        label.center()
-        
-        # Use lambda with default argument to capture the value
-        btn.add_event_cb(lambda e, num=i: num_btn_event_with_num(e, num), lv.EVENT.CLICKED, None)
-        buttons.append(btn)
-    
-    # Button 0
-    btn_0 = lv.button(scrn)
-    btn_0.set_size(btn_width, btn_height)
-    btn_0.set_pos(start_x + btn_width + btn_spacing, 
-                 start_y + 3 * (btn_height + btn_spacing))
-    btn_0.set_style_bg_color(lv.color_hex(0x4444FF), 0)
-    
-    label_0 = lv.label(btn_0)
-    label_0.set_text("0")
-    label_0.set_style_text_font(lv.font_montserrat_16, 0)
-    label_0.center()
-    
-    btn_0.add_event_cb(lambda e: num_btn_event_with_num(e, 0), lv.EVENT.CLICKED, None)
-    
-    # Clear button
-    btn_clear = lv.button(scrn)
-    btn_clear.set_size(btn_width, btn_height)
-    btn_clear.set_pos(start_x, start_y + 3 * (btn_height + btn_spacing))
-    btn_clear.set_style_bg_color(lv.color_hex(0xFF4444), 0)
-    
-    label_clear = lv.label(btn_clear)
-    label_clear.set_text("CLR")
-    label_clear.set_style_text_font(lv.font_montserrat_16, 0)
-    label_clear.center()
-    
-    btn_clear.add_event_cb(clear_btn_event, lv.EVENT.CLICKED, None)
-    
-    # Enter button
-    btn_enter = lv.button(scrn)
-    btn_enter.set_size(btn_width, btn_height)
-    btn_enter.set_pos(start_x + 2 * (btn_width + btn_spacing), 
-                     start_y + 3 * (btn_height + btn_spacing))
-    btn_enter.set_style_bg_color(lv.color_hex(0x44FF44), 0)
-    
-    label_enter = lv.label(btn_enter)
-    label_enter.set_text("OK")
-    label_enter.set_style_text_font(lv.font_montserrat_16, 0)
-    label_enter.center()
-    
-    btn_enter.add_event_cb(enter_btn_event, lv.EVENT.CLICKED, None)
-    btn_enter.add_event_cb(enter_btn_event, lv.EVENT.PRESSED, None)
-    
-    lv.task_handler()
-    lv.refr_now(None)
-    
-    # Wait for code entry
-    print("Waiting for 4-digit code...")
-    while not code_complete:
-        lv.task_handler()
-        sleep(0.05)
-    
-    # Code entered, fetch from server
-    print(f"Fetching code with: {code_input}")
-    code_display.set_text("Fetching code...")
-    lv.task_handler()
-    
-    try:
-        import urequests
-        url = f"https://build.semiblock.ai/api/getProject?code={code_input}"
-        print(f"URL: {url}")
-        response = urequests.get(url)
-        if response.status_code == 200:
-            code = response.text
-            print(f"Code received ({len(code)} bytes)")
-            code_display.set_text("Executing code...")
-            lv.task_handler()
-            sleep(1)
-            
-            # Execute the code
-            exec(code)
-        else:
-            print(f"Failed to fetch code: HTTP {response.status_code}")
-            code_display.set_text(f"Fetch failed: {response.status_code}")
-            code_display.set_style_text_color(lv.color_hex(0xFF0000), 0)
-        response.close()
-    except Exception as e:
-        print(f"Error fetching/executing code: {e}")
-        code_display.set_text(f"Error: {str(e)}")
-        code_display.set_style_text_color(lv.color_hex(0xFF0000), 0)
 
 lv.task_handler()
 lv.refr_now(None)
@@ -561,7 +641,7 @@ lv.refr_now(None)
 # connect_to_wifi('peter 2.4G', 'peter1234')
 
 # Keep display active
-# print("Setup complete")
+print("Setup complete - entering main loop")
 while True:
-#     lv.task_handler()
-    sleep(0.1)
+    lv.task_handler()
+    sleep(0.05)

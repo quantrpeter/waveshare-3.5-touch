@@ -3,4 +3,3 @@ upload:
 
 run:
 	mpremote reset && sleep 2 && mpremote run displayImage.py
-

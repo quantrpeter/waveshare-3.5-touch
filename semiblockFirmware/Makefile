@@ -5,3 +5,6 @@ upload:
 run:
 	mpremote reset && sleep 2 && mpremote run semiblockFirmwareV2.py
 
+burn:
+	mpremote cp semiblockFirmwareV2.py :main.py
+
