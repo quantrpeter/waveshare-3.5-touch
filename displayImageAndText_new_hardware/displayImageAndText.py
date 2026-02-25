@@ -1,7 +1,7 @@
 import lcd_bus
 import machine
 from time import sleep
-import st7796
+import axs15231b
 import lvgl as lv
 import task_handler
 from fs_driver import fs_register
@@ -24,22 +24,22 @@ print("Initializing SPI bus...")
 spi_bus = machine.SPI.Bus(host=_HOST, mosi=_MOSI, miso=_MISO, sck=_SCK)
 
 print("Initializing display bus...")
-display_bus = lcd_bus.SPIBus(spi_bus=spi_bus, freq=_LCD_FREQ, dc=_DC, cs=_LCD_CS, spi_mode=3, quad=True)
+display_bus = lcd_bus.SPIBus(spi_bus=spi_bus, freq=_LCD_FREQ, dc=_DC, cs=_LCD_CS)
 
 # Allocate framebuffers in SPIRAM
 buf1 = display_bus.allocate_framebuffer(100*320*2, lcd_bus.MEMORY_SPIRAM)
 buf2 = display_bus.allocate_framebuffer(100*320*2, lcd_bus.MEMORY_SPIRAM)
 
-print("Initializing ST7796 display...")
-display = st7796.ST7796(
+print("Initializing AXS15231B display...")
+display = axs15231b.AXS15231B(
     data_bus=display_bus,
     display_width=_WIDTH,
     display_height=_HEIGHT,
     backlight_pin=_BL,
     reset_pin=None,
-    backlight_on_state=st7796.STATE_HIGH,
+    backlight_on_state=axs15231b.STATE_HIGH,
     color_space=lv.COLOR_FORMAT.RGB565,
-    color_byte_order=st7796.BYTE_ORDER_BGR,
+    color_byte_order=axs15231b.BYTE_ORDER_BGR,
     rgb565_byte_swap=True,
     offset_x=_OFFSET_X,
     offset_y=_OFFSET_Y,

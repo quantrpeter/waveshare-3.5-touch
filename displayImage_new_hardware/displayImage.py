@@ -1,8 +1,8 @@
 import lcd_bus
 import machine
 from time import sleep
-import st7796
 import lvgl as lv
+import axs15231b
 import task_handler
 from fs_driver import fs_register
 
@@ -12,34 +12,53 @@ _HEIGHT = 480
 _MOSI = 1 
 _MISO = 2
 _SCK = 5
-_HOST = 1
-_DC = 3
-_LCD_CS = 0
+_HOST = 2
+_DC = -1    # No DC GPIO for QSPI AXS15231B - D/C encoded in protocol
+_LCD_CS = 12
 _BL = 6
 _LCD_FREQ = 20000000
 _OFFSET_X = 0
 _OFFSET_Y = 0
 
+_DATA0_PIN = 1   # QSPI Data 0 (MOSI equivalent)
+_DATA1_PIN = 2   # QSPI Data 1 (MISO equivalent)
+_DATA2_PIN = 3   # QSPI Data 2
+_DATA3_PIN = 4   # QSPI Data 3
+
 print("Initializing SPI bus...")
-spi_bus = machine.SPI.Bus(host=_HOST, mosi=_MOSI, miso=_MISO, sck=_SCK)
+# spi_bus = machine.SPI.Bus(host=_HOST, mosi=_MOSI, miso=_MISO, sck=_SCK)
+spi_bus = machine.SPI.Bus(
+    host=_HOST,  # SPI2_HOST
+    sck=_SCK,
+    quad_pins=(_DATA0_PIN, _DATA1_PIN, _DATA2_PIN, _DATA3_PIN)
+)
 
 print("Initializing display bus...")
-display_bus = lcd_bus.SPIBus(spi_bus=spi_bus, freq=_LCD_FREQ, dc=_DC, cs=_LCD_CS, spi_mode=3, quad=True)
+# display_bus = lcd_bus.SPIBus(spi_bus=spi_bus, freq=_LCD_FREQ, dc=_DC, cs=_LCD_CS)
+display_bus = lcd_bus.SPIBus(
+    spi_bus=spi_bus,
+    dc=_DC,
+    cs=_LCD_CS, 
+    freq=_LCD_FREQ,
+    spi_mode=0,      # SPI mode 0 (CPOL=0, CPHA=0) - AXS15231B default
+    quad=True        # Enable QSPI mode (4-wire)
+)
 
-# Allocate framebuffers in SPIRAM
-buf1 = display_bus.allocate_framebuffer(100*320*2, lcd_bus.MEMORY_SPIRAM)
-buf2 = display_bus.allocate_framebuffer(100*320*2, lcd_bus.MEMORY_SPIRAM)
+# Allocate framebuffers in SPIRAM (partial buffer - 100 rows at a time to stay within SPI DMA limits)
+_BUFFER_SIZE = 100 * _WIDTH * 2
+buf1 = display_bus.allocate_framebuffer(_BUFFER_SIZE, lcd_bus.MEMORY_SPIRAM)
+buf2 = display_bus.allocate_framebuffer(_BUFFER_SIZE, lcd_bus.MEMORY_SPIRAM)
 
-print("Initializing ST7796 display...")
-display = st7796.ST7796(
+print("Initializing AXS15231B display...")
+display = axs15231b.AXS15231B(
     data_bus=display_bus,
     display_width=_WIDTH,
     display_height=_HEIGHT,
     backlight_pin=_BL,
     reset_pin=None,
-    backlight_on_state=st7796.STATE_HIGH,
+    backlight_on_state=axs15231b.STATE_HIGH,
     color_space=lv.COLOR_FORMAT.RGB565,
-    color_byte_order=st7796.BYTE_ORDER_BGR,
+    color_byte_order=axs15231b.BYTE_ORDER_BGR,
     rgb565_byte_swap=True,
     offset_x=_OFFSET_X,
     offset_y=_OFFSET_Y,
@@ -48,8 +67,9 @@ display = st7796.ST7796(
 )
 
 display.init()
-display.set_rotation(lv.DISPLAY_ROTATION._90)  # Landscape mode
+display.set_rotation(lv.DISPLAY_ROTATION._90)
 display.set_color_inversion(True)
+display.set_power(True)
 display.set_backlight(100)
 
 print("Display ready")
@@ -72,14 +92,6 @@ img = lv.image(scrn)
 img.set_src("S:semiblock_logo_2.png")  # Change to your image filename
 img.set_size(200, 200)  # Set image size (width, height)
 img.align(lv.ALIGN.CENTER, 0, 0)  # Center the image
-
-label = lv.label(scrn)
-label.set_text("Hello World")
-label.set_style_text_color(lv.color_hex(0x0000FF), 0)
-
-# Refresh display
-lv.task_handler()
-lv.refr_now(None)
 
 print("Image displayed successfully!")
 
