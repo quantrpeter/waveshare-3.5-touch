@@ -1,9 +1,7 @@
 import lcd_bus
 import machine
-from time import sleep
 import lvgl as lv
 import axs15231b
-import task_handler
 
 # Display settings for Waveshare ESP32-S3-Touch-LCD-3.5B (QSPI, from bsp_display.h)
 # SPI2_HOST, CS=12, SCLK=5, D0=1, D1=2, D2=3, D3=4, BL=6, no DC
@@ -37,10 +35,6 @@ display_bus = lcd_bus.SPIBus(
     quad=True
 )
 
-# Allocate framebuffers in SPIRAM (partial buffer - 100 rows at a time)
-_BUFFER_SIZE = 100 * _WIDTH * 2
-buf1 = display_bus.allocate_framebuffer(_BUFFER_SIZE, lcd_bus.MEMORY_SPIRAM)
-buf2 = display_bus.allocate_framebuffer(_BUFFER_SIZE, lcd_bus.MEMORY_SPIRAM)
 
 print("Initializing AXS15231B display...")
 display = axs15231b.AXS15231B(
@@ -54,9 +48,7 @@ display = axs15231b.AXS15231B(
     color_byte_order=axs15231b.BYTE_ORDER_BGR,
     rgb565_byte_swap=True,
     offset_x=_OFFSET_X,
-    offset_y=_OFFSET_Y,
-    frame_buffer1=buf1,
-    frame_buffer2=buf2,
+    offset_y=_OFFSET_Y
 )
 
 display.init()
@@ -66,9 +58,6 @@ display.set_power(True)
 display.set_backlight(100)
 
 print("Display ready")
-
-# TaskHandler drives LVGL tick and flush automatically
-th = task_handler.TaskHandler()
 
 # Get active screen and set background
 scrn = lv.screen_active()
@@ -82,6 +71,7 @@ label.align(lv.ALIGN.CENTER, 0, 0)
 
 print("Screen set up, entering main loop...")
 
-while True:
-    lv.task_handler()
-    sleep(0.1)
+
+import task_handler
+
+th = task_handler.TaskHandler()
