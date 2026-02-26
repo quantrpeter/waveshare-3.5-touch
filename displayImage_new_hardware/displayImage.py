@@ -4,47 +4,40 @@ from time import sleep
 import lvgl as lv
 import axs15231b
 import task_handler
-from fs_driver import fs_register
 
-# Display settings for Waveshare ESP32-S3-Touch-LCD-3.5
+# Display settings for Waveshare ESP32-S3-Touch-LCD-3.5B (QSPI, from bsp_display.h)
+# SPI2_HOST, CS=12, SCLK=5, D0=1, D1=2, D2=3, D3=4, BL=6, no DC
 _WIDTH = 320
 _HEIGHT = 480
-_MOSI = 1 
-_MISO = 2
+_HOST = 2         # SPI2_HOST
 _SCK = 5
-_HOST = 2
-_DC = -1    # No DC GPIO for QSPI AXS15231B - D/C encoded in protocol
+_DATA0 = 1
+_DATA1 = 2
+_DATA2 = 3
+_DATA3 = 4
 _LCD_CS = 12
 _BL = 6
-_LCD_FREQ = 20000000
+_LCD_FREQ = 40000000   # 40 MHz as used in BSP
 _OFFSET_X = 0
 _OFFSET_Y = 0
 
-_DATA0_PIN = 1   # QSPI Data 0 (MOSI equivalent)
-_DATA1_PIN = 2   # QSPI Data 1 (MISO equivalent)
-_DATA2_PIN = 3   # QSPI Data 2
-_DATA3_PIN = 4   # QSPI Data 3
-
-print("Initializing SPI bus...")
-# spi_bus = machine.SPI.Bus(host=_HOST, mosi=_MOSI, miso=_MISO, sck=_SCK)
+print("Initializing QSPI bus...")
 spi_bus = machine.SPI.Bus(
-    host=_HOST,  # SPI2_HOST
+    host=_HOST,
     sck=_SCK,
-    quad_pins=(_DATA0_PIN, _DATA1_PIN, _DATA2_PIN, _DATA3_PIN)
+    quad_pins=(_DATA0, _DATA1, _DATA2, _DATA3)
 )
 
 print("Initializing display bus...")
-# display_bus = lcd_bus.SPIBus(spi_bus=spi_bus, freq=_LCD_FREQ, dc=_DC, cs=_LCD_CS)
 display_bus = lcd_bus.SPIBus(
     spi_bus=spi_bus,
-    dc=_DC,
-    cs=_LCD_CS, 
+    dc=-1,          # No DC pin for QSPI AXS15231B
+    cs=_LCD_CS,
     freq=_LCD_FREQ,
-    spi_mode=0,      # SPI mode 0 (CPOL=0, CPHA=0) - AXS15231B default
-    quad=True        # Enable QSPI mode (4-wire)
+    quad=True
 )
 
-# Allocate framebuffers in SPIRAM (partial buffer - 100 rows at a time to stay within SPI DMA limits)
+# Allocate framebuffers in SPIRAM (partial buffer - 100 rows at a time)
 _BUFFER_SIZE = 100 * _WIDTH * 2
 buf1 = display_bus.allocate_framebuffer(_BUFFER_SIZE, lcd_bus.MEMORY_SPIRAM)
 buf2 = display_bus.allocate_framebuffer(_BUFFER_SIZE, lcd_bus.MEMORY_SPIRAM)
@@ -74,28 +67,21 @@ display.set_backlight(100)
 
 print("Display ready")
 
-# Initialize task handler for LVGL
+# TaskHandler drives LVGL tick and flush automatically
 th = task_handler.TaskHandler()
 
-# Get active screen
+# Get active screen and set background
 scrn = lv.screen_active()
-scrn.set_style_bg_color(lv.color_hex(0x000000), 0)  # Black background
+scrn.set_style_bg_color(lv.color_hex(0x0000FF), 0)  # Blue background - visible test
 
-# Register filesystem driver
-print("Registering filesystem...")
-fs_drv = lv.fs_drv_t()
-fs_register(fs_drv, "S")
+# Add a label to confirm rendering works
+label = lv.label(scrn)
+label.set_text("Hello Display!")
+label.set_style_text_color(lv.color_hex(0xFFFFFF), 0)
+label.align(lv.ALIGN.CENTER, 0, 0)
 
-# Create and display image
-print("Creating image...")
-img = lv.image(scrn)
-img.set_src("S:semiblock_logo_2.png")  # Change to your image filename
-img.set_size(200, 200)  # Set image size (width, height)
-img.align(lv.ALIGN.CENTER, 0, 0)  # Center the image
+print("Screen set up, entering main loop...")
 
-print("Image displayed successfully!")
-
-# Keep the display running
 while True:
     lv.task_handler()
     sleep(0.1)

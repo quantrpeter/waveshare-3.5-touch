@@ -5,3 +5,4 @@ https://peter.hkprog.org/2025/10/lvgl_micropython-build-for-waveshare-esp32-s3-3
 # Scale the image
 
 convert blue_1.png -resize 480x blue_1_480.png
+
