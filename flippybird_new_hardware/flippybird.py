@@ -12,25 +12,27 @@ import pointer_framework
 import task_handler
 from fs_driver import fs_register
 
-# Display settings for Waveshare ESP32-S3-Touch-LCD-3.5
+# Display settings for Waveshare ESP32-S3-Touch-LCD-3.5B (AXS15231B)
+# Pin mapping from official ESP-IDF demo (05_lvgl_example)
 _WIDTH = 320
 _HEIGHT = 480
-_MOSI = 1 
-_MISO = 2
-_SCK = 5
+_QSPI_D0 = 1
+_QSPI_D1 = 2
+_QSPI_D2 = 3
+_QSPI_D3 = 4
+_QSPI_CLK = 5
 _HOST = 1
-_DC = 3
-_LCD_CS = 0
+_LCD_CS = 12
 _BL = 6
-_LCD_FREQ = 20000000
+_LCD_FREQ = 40000000
 _OFFSET_X = 0
 _OFFSET_Y = 0
 _I2C_SDA = 8
 _I2C_SCL = 7
 
-# Touch settings
-_TOUCH_I2C_ADDR = 0x38
-_TOUCH_INT = 4
+# Touch settings (I2C address 0x3B per official demo)
+_TOUCH_I2C_ADDR = 0x3B
+_TOUCH_INT = -1
 _TOUCH_RST = None
 
 # Game constants (display is rotated to 480x320)
@@ -43,11 +45,41 @@ GRAVITY = 0.7
 JUMP_STRENGTH = -4
 PIPE_SPEED = 3
 
+# TCA9554 IO expander performs hardware reset of the AXS15231B
+print("Resetting display via TCA9554...")
+_TCA_ADDR = 0x20
+_tca = machine.SoftI2C(sda=machine.Pin(_I2C_SDA), scl=machine.Pin(_I2C_SCL), freq=400000)
+try:
+    _cfg = _tca.readfrom_mem(_TCA_ADDR, 0x03, 1)[0] & ~0x02
+    _tca.writeto_mem(_TCA_ADDR, 0x03, bytes([_cfg]))
+    _out = _tca.readfrom_mem(_TCA_ADDR, 0x01, 1)[0] & ~0x02
+    _tca.writeto_mem(_TCA_ADDR, 0x01, bytes([_out]))
+    sleep(0.1)
+    _tca.writeto_mem(_TCA_ADDR, 0x01, bytes([_out | 0x02]))
+    sleep(0.2)
+    print("Display reset complete")
+except Exception as e:
+    print("TCA9554 reset failed:", e)
+del _tca
+
 print("Initializing SPI bus...")
-spi_bus = machine.SPI.Bus(host=_HOST, mosi=_MOSI, miso=_MISO, sck=_SCK)
+spi_bus = machine.SPI.Bus(
+    host=_HOST,
+    mosi=_QSPI_D0,
+    miso=_QSPI_D1,
+    sck=_QSPI_CLK,
+    quad_pins=(_QSPI_D0, _QSPI_D1, _QSPI_D2, _QSPI_D3),
+)
 
 print("Initializing display bus...")
-display_bus = lcd_bus.SPIBus(spi_bus=spi_bus, freq=_LCD_FREQ, dc=_DC, cs=_LCD_CS)
+display_bus = lcd_bus.SPIBus(
+    spi_bus=spi_bus,
+    dc=-1,
+    cs=_LCD_CS,
+    freq=_LCD_FREQ,
+    spi_mode=0,
+    quad=True,
+)
 
 buf1 = display_bus.allocate_framebuffer(100*320*2, lcd_bus.MEMORY_SPIRAM)
 buf2 = display_bus.allocate_framebuffer(100*320*2, lcd_bus.MEMORY_SPIRAM)
@@ -59,9 +91,8 @@ display = axs15231b.AXS15231B(
     display_height=_HEIGHT,
     backlight_pin=_BL,
     reset_pin=None,
-    backlight_on_state=axs15231b.STATE_HIGH,
+    backlight_on_state=axs15231b.STATE_PWM,
     color_space=lv.COLOR_FORMAT.RGB565,
-    color_byte_order=axs15231b.BYTE_ORDER_BGR,
     rgb565_byte_swap=True,
     offset_x=_OFFSET_X,
     offset_y=_OFFSET_Y,
@@ -69,19 +100,20 @@ display = axs15231b.AXS15231B(
     frame_buffer2=buf2,
 )
 
+display.set_power(True)
+display.set_backlight(100)
 display.init()
 
-# Initialize touch BEFORE setting rotation
-print("Initializing FT6336 touch...")
-i2c_bus = i2c.I2C.Bus(host=0, scl=_I2C_SCL, sda=_I2C_SDA, freq=400000, use_locks=False)
+print("Initializing AXS15231 touch...")
+i2c_bus = i2c.I2C.Bus(host=0, scl=_I2C_SCL, sda=_I2C_SDA)
 touch_dev = i2c.I2C.Device(bus=i2c_bus, dev_id=_TOUCH_I2C_ADDR, reg_bits=axs15231.BITS)
-indev = axs15231.AXS15231(touch_dev, startup_rotation=pointer_framework.lv.DISPLAY_ROTATION._90)
+indev = axs15231.AXS15231(touch_dev)
 print("Touch driver initialized")
 
-# Set rotation AFTER touch initialization
-display.set_rotation(lv.DISPLAY_ROTATION._90)
-display.set_color_inversion(True)
-display.set_backlight(100)
+try:
+    display.set_rotation(lv.DISPLAY_ROTATION._90)
+except NotImplementedError:
+    print("Rotation not supported in this firmware, using portrait mode")
 
 print("Display ready")
 
