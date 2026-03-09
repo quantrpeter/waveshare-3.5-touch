@@ -7,7 +7,10 @@ import task_handler
 from fs_driver import fs_register
 
 # Display settings for Waveshare ESP32-S3-Touch-LCD-3.5B (AXS15231B)
-# Pin mapping from official ESP-IDF demo (05_lvgl_example)
+# Pin mapping from official ESP-IDF demo (05_lvgl_example/bsp_display.h)
+#   QSPI D0=1, D1=2, D2=3, D3=4, CLK=5, CS=12, BL=6
+#   No physical DC pin -- AXS15231B uses 9-bit SPI command prefix in QSPI mode
+#   LCD reset via TCA9554 IO expander pin 1 (I2C 0x20, SDA=8, SCL=7)
 _WIDTH = 320
 _HEIGHT = 480
 _QSPI_D0 = 1
@@ -16,14 +19,14 @@ _QSPI_D2 = 3
 _QSPI_D3 = 4
 _QSPI_CLK = 5
 _HOST = 1
+_DC = 0        # no physical DC on this board; use GPIO 0 (BOOT btn) as dummy
 _LCD_CS = 12
 _BL = 6
 _LCD_FREQ = 40000000
 _I2C_SDA = 8
 _I2C_SCL = 7
 
-# TCA9554 IO expander performs hardware reset of the AXS15231B.
-# Without this the display stays uninitialized.
+# Hardware reset via TCA9554 IO expander (required for AXS15231B)
 print("Resetting display via TCA9554...")
 _TCA_ADDR = 0x20
 _tca = machine.SoftI2C(sda=machine.Pin(_I2C_SDA), scl=machine.Pin(_I2C_SCL), freq=400000)
@@ -52,7 +55,7 @@ spi_bus = machine.SPI.Bus(
 print("Initializing display bus...")
 display_bus = lcd_bus.SPIBus(
     spi_bus=spi_bus,
-    dc=-1,
+    dc=_DC,
     cs=_LCD_CS,
     freq=_LCD_FREQ,
     spi_mode=0,
@@ -76,14 +79,10 @@ display = axs15231b.AXS15231B(
     frame_buffer2=buf2,
 )
 
-display.set_power(True)
-display.set_backlight(100)
+print("Running display.init()...")
 display.init()
-
-try:
-    display.set_rotation(lv.DISPLAY_ROTATION._90)
-except NotImplementedError:
-    print("Rotation not supported in this firmware, using portrait mode")
+print("Setting backlight...")
+display.set_backlight(100)
 
 print("Display ready")
 

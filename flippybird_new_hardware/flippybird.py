@@ -74,7 +74,7 @@ spi_bus = machine.SPI.Bus(
 print("Initializing display bus...")
 display_bus = lcd_bus.SPIBus(
     spi_bus=spi_bus,
-    dc=-1,
+    dc=_QSPI_D2,
     cs=_LCD_CS,
     freq=_LCD_FREQ,
     spi_mode=0,
@@ -100,9 +100,8 @@ display = axs15231b.AXS15231B(
     frame_buffer2=buf2,
 )
 
-display.set_power(True)
-display.set_backlight(100)
 display.init()
+display.set_backlight(100)
 
 print("Initializing AXS15231 touch...")
 i2c_bus = i2c.I2C.Bus(host=0, scl=_I2C_SCL, sda=_I2C_SDA)
