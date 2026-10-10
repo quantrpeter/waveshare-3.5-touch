@@ -65,6 +65,8 @@ _CAM_PCLK_SIG = 149
 _CAM_HREF_SIG = 150
 _CAM_VSYNC_SIG = 152
 
+_GPIO_IN = 0x6000403C  # for direct VSYNC read during sync (avoids Pin object)
+
 
 def _qspi_color_cmd(cmd):
     cmd &= 0xFF
@@ -230,6 +232,10 @@ def _stream_qqvga(i2c):
     _sccb_write(i2c, 0x4713, 0x03)
     _sccb_write(i2c, 0x3008, 0x02)
     sleep(0.05)
+
+    # Enable auto exposure/gain so a normal scene produces visible brightness.
+    _sccb_write(i2c, 0x3503, 0x00)
+    sleep(0.15)
     print("Sensor streaming")
 
 
@@ -267,6 +273,21 @@ def _grab(buf):
     while si < words:
         machine.mem32[uctypes.addressof(saved) + si * 4] = machine.mem32[_DMA_DESC + si * 4]
         si += 1
+
+    # Best-effort VSYNC sync using direct GPIO IN reg (reliable even when matrix-routed).
+    # We wait for a rising edge so capture starts near top of frame. If no edge seen
+    # within timeout we just proceed (DMA will still clock whatever is on the bus).
+    t0 = ticks_ms()
+    def _vs_high():
+        return (machine.mem32[_GPIO_IN] & (1 << _VSYNC)) != 0
+    # Wait until VSYNC is low (or timeout)
+    while _vs_high() and ticks_diff(ticks_ms(), t0) < 150:
+        pass
+    # Wait for rising edge (low -> high)
+    while (not _vs_high()) and ticks_diff(ticks_ms(), t0) < 400:
+        pass
+    vs_wait = ticks_diff(ticks_ms(), t0)
+    print("vsync sync waited", vs_wait, "ms")
 
     n = 0
     off = 0
@@ -320,6 +341,55 @@ def _grab(buf):
     while si < words:
         machine.mem32[_DMA_DESC + si * 4] = machine.mem32[uctypes.addressof(saved) + si * 4]
         si += 1
+
+    if raw & 0x02:
+        print("grab eof raw=", hex(raw), "filled=", filled)
+        return filled
+
+    # Fallback: if no EOF (e.g. sync started at bad phase), try one immediate grab
+    # without re-building a full sync wait. Re-arm and start again.
+    print("grab no eof, retrying immediate...")
+    # re-arm descriptors (owner bits)
+    off = 0
+    ni = 0
+    while off < size:
+        addr = _DMA_DESC + ni * 12
+        take = size - off
+        if take > 2048:
+            take = 2048
+        owner = take | (1 << 31)
+        if off + take >= size:
+            owner |= 1 << 30
+        machine.mem32[addr] = owner
+        machine.mem32[addr + 4] = baddr + off
+        # next already set from first build
+        ni += 1
+        off += take
+
+    machine.mem32[_GDMA + 0x00] = 1
+    machine.mem32[_GDMA + 0x00] = 0
+    machine.mem32[_GDMA + 0x20] = (_DMA_DESC & 0xFFFFF) | (1 << 22)
+    machine.mem32[_LCD_CAM + 0x08] = (size - 1) | (1 << 23) | (1 << 29)
+    machine.mem32[_LCD_CAM + 0x04] = 1 << 4
+
+    start = ticks_ms()
+    raw = 0
+    while ticks_diff(ticks_ms(), start) < 800:
+        raw = machine.mem32[_GDMA + 0x08] & 0xFFFFFFFF
+        if raw & 0x02:
+            break
+    machine.mem32[_GDMA + 0x20] = 1 << 21
+    machine.mem32[_LCD_CAM + 0x08] = (size - 1) | (1 << 23)
+    filled = 0
+    ni = 0
+    while ni < n:
+        filled += (machine.mem32[_DMA_DESC + ni * 12] >> 12) & 0xFFF
+        ni += 1
+    si = 0
+    while si < words:
+        machine.mem32[_DMA_DESC + si * 4] = machine.mem32[uctypes.addressof(saved) + si * 4]
+        si += 1
+    print("grab2 raw=", hex(raw), "filled=", filled)
     if raw & 0x02:
         return filled
     return 0
@@ -444,21 +514,31 @@ if _got == 0:
     status.set_text("no frame")
     print("No frame")
 else:
-    # YUYV, little-endian on this bus: Y is the odd byte. 0xFF is white, so
-    # a saturated grab looks blank unless the background stays dark.
+    # YUYV422: typically Y0,U0,Y1,V0,... so Y is at even indices.
+    # Compute stats for diagnostics.
     _nz = 0
+    _mn = 255
+    _mx = 0
     for _b in _frame:
+        if _b < _mn:
+            _mn = _b
+        if _b > _mx:
+            _mx = _b
         if _b != 0xFF and _b != 0x00:
             _nz += 1
-    print("frame", _got, "varied", _nz)
+    _head = bytes(_frame[:16])
+    print("frame bytes=", _got, "min=", hex(_mn), "max=", hex(_mx), "varied=", _nz)
+    print("head:", _head)
     _i = 0
     while _i < _pixels:
-        _y = _frame[_i * 2 + 1]
+        _y = _frame[_i * 2]  # even byte = Y for standard YUYV
         _canvas_buf[_i * 2] = (_y >> 3) | ((_y & 0x1C) << 3)
         _canvas_buf[_i * 2 + 1] = (_y & 0xF8) | (_y >> 5)
         _i += 1
     canvas.invalidate()
-    status.set_text(str(_nz) + " varied")
+    lv.task_handler()
+    lv.task_handler()
+    status.set_text(str(_got) + "B " + str(_nz) + "v")
 while True:
     lv.task_handler()
     sleep(0.05)
