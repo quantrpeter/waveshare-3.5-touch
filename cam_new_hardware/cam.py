@@ -1,21 +1,22 @@
 import lcd_bus
 import machine
-from time import sleep, ticks_ms, ticks_diff
-import esp
-import uctypes
+import micropython
+import gc
+from time import sleep
 import axs15231b
 import lvgl as lv
 import task_handler
 
-# OV5640 preview for the Waveshare ESP32-S3-Touch-LCD-3.5B.
-#
-# The sensor sits on the 24-pin DVP socket and only answers on SCCB (I2C
-# address 0x3C) while its XCLK pin is being clocked. This firmware has no
-# camera driver, so one frame is pulled through the LCD_CAM DMA block into
-# PSRAM and drawn on the LCD. The DMA descriptor has to live in internal RAM.
+# OV5640 preview for Waveshare ESP32-S3-Touch-LCD-3.5B (AXS15231B).
+# Display pins match the other *_new_hardware examples.
+# Camera pins match Waveshare Arduino `03_camera_web_server`:
+#   XCLK=38  SIOD=8  SIOC=7  VSYNC=17  HREF=18  PCLK=41
+#   D0..D7 = 45, 47, 48, 46, 42, 40, 39, 21
+# This lvgl_micropython build has no esp32-camera C module, so frames are
+# sampled from the DVP pins in viper. RGB565 DVP on this module does not
+# emit one PCLK per byte (HREF stays high for ~9781 clocks), so the preview
+# uses Y8 at a slowed PCLK and expands it to RGB565 gray on a canvas.
 
-# Display settings for Waveshare ESP32-S3-Touch-LCD-3.5B (AXS15231B)
-#   QSPI D0=1, D1=2, D2=3, D3=4, CLK=5, CS=12, BL=6
 _WIDTH = 320
 _HEIGHT = 480
 _QSPI_D0 = 1
@@ -34,38 +35,22 @@ _LCD_CMD_RAMWRC = 0x3C
 _LCD_QSPI_WRITE_COLOR = 0x32
 _DRAW_BUFFER_LINES = 48
 
-# Camera. SCCB shares the board I2C bus. XCLK is GPIO 38.
 _I2C_SDA = 8
 _I2C_SCL = 7
-_XCLK = 38
-_XCLK_HZ = 20000000
 _PMU_ADDR = 0x34
-_CAM_ADDR = 0x3C
-_OV5640_ID = 0x5640
+_OV5640_ADDR = 0x3C
+_XCLK_PIN = 38
+_XCLK_FREQ = 10000000
+_VSYNC_PIN = 17
+_HREF_PIN = 18
+_PCLK_PIN = 41
+_DATA_PINS = (45, 47, 48, 46, 42, 40, 39, 21)
 
-# DVP data bus, low bit first. VSYNC and HREF frame the picture.
-_DVP = (45, 47, 48, 46, 42, 40, 39, 21)
-_VSYNC = 17
-_HREF = 18
-_PCLK = 41
-
-# One QQVGA YUV422 frame. Only the Y byte is drawn.
 _CAM_W = 160
 _CAM_H = 120
-_FRAME_BYTES = _CAM_W * _CAM_H * 2
-
-# ESP32-S3 LCD_CAM and GDMA. Clock/reset are bit 8 and bit 6 of the second
-# peripheral clock and reset registers. Do not write these wholesale.
-_SYSTEM = 0x600C0000
-_LCD_CAM = 0x60041000
-_GDMA = 0x6003F000
-_DMA_DESC = 0x3FCEFE00
-_CAM_DATA0 = 133
-_CAM_PCLK_SIG = 149
-_CAM_HREF_SIG = 150
-_CAM_VSYNC_SIG = 152
-
-_GPIO_IN = 0x6000403C  # for direct VSYNC read during sync (avoids Pin object)
+_PREVIEW_W = 320
+_PREVIEW_H = 240
+_REG_DLY = 0xFFFF
 
 
 def _qspi_color_cmd(cmd):
@@ -82,8 +67,6 @@ def _install_axs15231b_qspi_workarounds(display):
     if display._data_bus.get_lane_count() != 4:
         return
 
-    # Both CASET and RASET must be sent for every flush, otherwise partial
-    # redraws land in the wrong place and the screen appears frozen.
     def _set_memory_location_qspi(x1, y1, x2, y2):
         param_buf = display._param_buf  # NOQA
 
@@ -99,10 +82,10 @@ def _install_axs15231b_qspi_workarounds(display):
         param_buf[3] = y2 & 0xFF
         display.set_params(_LCD_CMD_RASET, display._param_mv[:4])
 
-        if y1 == 0:
-            return _qspi_color_cmd(_LCD_CMD_RAMWR)
-
-        return _qspi_color_cmd(_LCD_CMD_RAMWRC)
+        # Always start a new RAM write. RAMWRC is only valid as a continuation
+        # of a flush that began at y=0; a centered camera widget starts at
+        # y~120 and otherwise lands in the wrong place (garbled stripes).
+        return _qspi_color_cmd(_LCD_CMD_RAMWR)
 
     display._set_memory_location = _set_memory_location_qspi
 
@@ -135,264 +118,277 @@ def _allocate_draw_buffers(display_bus, width, lines, color_space):
     raise MemoryError("Unable to allocate draw buffers")
 
 
-def _pmu_read(i2c, reg):
-    i2c.writeto(_PMU_ADDR, bytes([reg]))
-    return i2c.readfrom(_PMU_ADDR, 1)[0]
+_OV5640_INIT = (
+    (0x3008, 0x82),
+    (_REG_DLY, 10),
+    (0x3103, 0x13),
+    (0x3008, 0x02),
+    (0x3017, 0xFF),
+    (0x3018, 0xFF),
+    (0x300E, 0x58),
+    (0x302C, 0xC3),
+    (0x4740, 0x21),
+    (0x4713, 0x00),
+    (0x3000, 0x20),
+    (_REG_DLY, 10),
+    (0x3002, 0x1C),
+    (0x3004, 0xFF),
+    (0x3006, 0xC3),
+    (0x5000, 0xA7),
+    (0x5001, 0xA3),
+    (0x370C, 0x02),
+    (0x3634, 0x40),
+    (0x3A02, 0x03),
+    (0x3A03, 0xD8),
+    (0x3A08, 0x01),
+    (0x3A09, 0x27),
+    (0x3A0A, 0x00),
+    (0x3A0B, 0xF6),
+    (0x3A0D, 0x04),
+    (0x3A0E, 0x03),
+    (0x3A0F, 0x30),
+    (0x3A10, 0x28),
+    (0x3A11, 0x60),
+    (0x3A13, 0x43),
+    (0x3A14, 0x03),
+    (0x3A15, 0xD8),
+    (0x3A18, 0x00),
+    (0x3A19, 0xF8),
+    (0x4001, 0x02),
+    (0x4004, 0x02),
+    (0x5180, 0xFF),
+    (0x5181, 0xF2),
+    (0x5182, 0x00),
+    (0x5183, 0x14),
+    (0x5184, 0x25),
+    (0x5185, 0x24),
+    (0x5186, 0x09),
+    (0x5187, 0x09),
+    (0x5188, 0x09),
+    (0x5189, 0x75),
+    (0x518A, 0x54),
+    (0x518B, 0xE0),
+    (0x518C, 0xB2),
+    (0x518D, 0x42),
+    (0x518E, 0x3D),
+    (0x518F, 0x56),
+    (0x5190, 0x46),
+    (0x5191, 0xF8),
+    (0x5192, 0x04),
+    (0x5193, 0x70),
+    (0x5194, 0xF0),
+    (0x5195, 0xF0),
+    (0x5196, 0x03),
+    (0x5197, 0x01),
+    (0x5198, 0x04),
+    (0x5199, 0x12),
+    (0x519A, 0x04),
+    (0x519B, 0x00),
+    (0x519C, 0x06),
+    (0x519D, 0x82),
+    (0x519E, 0x38),
+    (0x5480, 0x01),
+    (0x5481, 0x00),
+    (0x5482, 0x1E),
+    (0x5483, 0x3B),
+    (0x5484, 0x58),
+    (0x5485, 0x66),
+    (0x5486, 0x71),
+    (0x5487, 0x7D),
+    (0x5488, 0x83),
+    (0x5489, 0x8F),
+    (0x548A, 0x98),
+    (0x548B, 0xA6),
+    (0x548C, 0xB8),
+    (0x548D, 0xCA),
+    (0x548E, 0xD7),
+    (0x548F, 0xE3),
+    (0x5490, 0x1D),
+    (0x5580, 0x06),
+    (0x5583, 0x40),
+    (0x5584, 0x10),
+    (0x5586, 0x20),
+    (0x5587, 0x00),
+    (0x5588, 0x00),
+    (0x5589, 0x10),
+    (0x558A, 0x00),
+    (0x558B, 0xF8),
+    (0x501D, 0x40),
+    # Y8 (grayscale) on DVP. RGB565 HREF is not one byte per PCLK on this module.
+    (0x501F, 0x00),
+    (0x4300, 0x10),
+    (0x3820, 0x41),
+    (0x3821, 0x01),
+    (0x4514, 0xAA),
+    (0x4520, 0x0B),
+    (0x3212, 0x00),
+    (0x3800, 0x00),
+    (0x3801, 0x00),
+    (0x3802, 0x00),
+    (0x3803, 0x00),
+    (0x3804, 0x0A),
+    (0x3805, 0x3F),
+    (0x3806, 0x07),
+    (0x3807, 0x9F),
+    (0x3808, 0x00),
+    (0x3809, 0xA0),
+    (0x380A, 0x00),
+    (0x380B, 0x78),
+    (0x380C, 0x08),
+    (0x380D, 0x0C),
+    (0x380E, 0x00),
+    (0x380F, 0xB0),
+    (0x3810, 0x00),
+    (0x3811, 0x10),
+    (0x3812, 0x00),
+    (0x3813, 0x08),
+    (0x3814, 0x31),
+    (0x3815, 0x31),
+    (0x3212, 0x10),
+    (0x3212, 0xA0),
+    # ~250 kHz PCLK so viper can sample every Y8 byte.
+    (0x3039, 0x00),
+    (0x3034, 0x18),
+    (0x3035, 0x41),
+    (0x3036, 50),
+    (0x3037, 0x01),
+    (0x3108, 0x36),
+    (0x3824, 31),
+    (0x460C, 0x22),
+    (0x3103, 0x13),
+    (0x3008, 0x02),
+    (0x503D, 0x00),
+)
 
 
-def _sccb_write(i2c, reg, value):
-    i2c.writeto(_CAM_ADDR, bytes([(reg >> 8) & 0xFF, reg & 0xFF, value & 0xFF]))
+class OV5640:
+    def __init__(self, i2c, addr=_OV5640_ADDR):
+        self._i2c = i2c
+        self._addr = addr
+
+    def _write(self, reg, value):
+        self._i2c.writeto_mem(self._addr, reg, bytes([value & 0xFF]), addrsize=16)
+
+    def _read(self, reg):
+        return self._i2c.readfrom_mem(self._addr, reg, 1, addrsize=16)[0]
+
+    def pid(self):
+        return (self._read(0x300A) << 8) | self._read(0x300B)
+
+    def init(self):
+        for reg, value in _OV5640_INIT:
+            if reg == _REG_DLY:
+                sleep(value / 1000)
+            else:
+                self._write(reg, value)
 
 
-def _sccb_write16(i2c, reg, value):
-    _sccb_write(i2c, reg, (value >> 8) & 0xFF)
-    _sccb_write(i2c, reg + 1, value & 0xFF)
+@micropython.viper
+def _capture_y8(buf: ptr8, width: int, height: int) -> int:
+    gpio_in = ptr32(0x6000403C)
+    gpio_in1 = ptr32(0x60004040)
+    href = 1 << 18
+    pclk = 1 << 9
+    lastx = 0
+    y = 0
+    while y < height:
+        t = 20000000
+        while gpio_in[0] & href:
+            t -= 1
+            if t == 0:
+                return -(10 + y)
+        t = 20000000
+        while (gpio_in[0] & href) == 0:
+            t -= 1
+            if t == 0:
+                return -(110 + y)
+        x = 0
+        dest = y * width
+        while gpio_in[0] & href:
+            t = 40000
+            while gpio_in1[0] & pclk:
+                t -= 1
+                if t == 0:
+                    return -200
+            t = 40000
+            while (gpio_in1[0] & pclk) == 0:
+                t -= 1
+                if t == 0:
+                    return -201
+            if x < width:
+                in0 = gpio_in[0]
+                in1 = gpio_in1[0]
+                b = (in1 >> 13) & 1
+                b |= ((in1 >> 15) & 1) << 1
+                b |= ((in1 >> 16) & 1) << 2
+                b |= ((in1 >> 14) & 1) << 3
+                b |= ((in1 >> 10) & 1) << 4
+                b |= ((in1 >> 8) & 1) << 5
+                b |= ((in1 >> 7) & 1) << 6
+                b |= ((in0 >> 21) & 1) << 7
+                buf[dest + x] = b
+            x += 1
+        lastx = x
+        y += 1
+    # HREF often has a dummy extra PCLK; a couple short is still a usable line.
+    if lastx < width - 2:
+        return -300 - lastx
+    return y
 
 
-def _pmu_write(i2c, reg, value):
-    i2c.writeto(_PMU_ADDR, bytes([reg, value & 0xFF]))
+@micropython.viper
+def _y8_to_rgb565_2x(src: ptr8, dst: ptr8, width: int, height: int):
+    y = 0
+    while y < height:
+        x = 0
+        src_row = y * width
+        dst_row0 = (y * 2) * width * 4
+        dst_row1 = dst_row0 + width * 4
+        while x < width:
+            g = src[src_row + x]
+            pix = ((g >> 3) << 11) | ((g >> 2) << 5) | (g >> 3)
+            lo = pix & 0xFF
+            hi = pix >> 8
+            d = x * 4
+            dst[dst_row0 + d] = lo
+            dst[dst_row0 + d + 1] = hi
+            dst[dst_row0 + d + 2] = lo
+            dst[dst_row0 + d + 3] = hi
+            dst[dst_row1 + d] = lo
+            dst[dst_row1 + d + 1] = hi
+            dst[dst_row1 + d + 2] = lo
+            dst[dst_row1 + d + 3] = hi
+            x += 1
+        y += 1
 
 
-def _sccb_read(i2c, reg):
-    # OV5640 registers are 16-bit addressed.
-    i2c.writeto(_CAM_ADDR, bytes([(reg >> 8) & 0xFF, reg & 0xFF]))
-    return i2c.readfrom(_CAM_ADDR, 1)[0]
+def _enable_camera_power(i2c):
+    try:
+        chip = i2c.readfrom_mem(_PMU_ADDR, 0x03, 1)[0]
+    except OSError:
+        print("AXP2101 not found")
+        return
+    if chip != 0x4A:
+        print("Unexpected PMU id", hex(chip))
+        return
+    i2c.writeto_mem(_PMU_ADDR, 0x92, bytes([(3300 - 500) // 100]))
+    i2c.writeto_mem(_PMU_ADDR, 0x96, bytes([(1500 - 500) // 100]))
+    i2c.writeto_mem(_PMU_ADDR, 0x97, bytes([(2800 - 500) // 100]))
+    onoff = i2c.readfrom_mem(_PMU_ADDR, 0x90, 1)[0]
+    i2c.writeto_mem(_PMU_ADDR, 0x90, bytes([onoff | 0x31]))
+    print("AXP2101 camera rails enabled")
 
 
-def _start_camera(i2c):
-    # AXP2101 ALDO voltage is 0.5 V + n * 0.1 V.
-    # Factory comments: ALDO1 is camera DVDD, ALDO4 is camera AVDD.
-    print("Setting camera rails...")
-    _pmu_write(i2c, 0x92, 13)  # ALDO1 1.8 V
-    _pmu_write(i2c, 0x93, 23)  # ALDO2 2.8 V
-    _pmu_write(i2c, 0x95, 25)  # ALDO4 3.0 V
-    on = _pmu_read(i2c, 0x90)
-    _pmu_write(i2c, 0x90, on | 0x01 | 0x02 | 0x08)
-    sleep(0.05)
-
-    print("Starting XCLK...")
-    pwm = machine.PWM(machine.Pin(_XCLK), freq=_XCLK_HZ, duty_u16=32768)
-    print("XCLK", pwm.freq(), "Hz")
-    sleep(0.1)
-
-    found = i2c.scan()
-    print("I2C scan:", [hex(addr) for addr in found])
-    if _CAM_ADDR not in found:
-        raise OSError("OV5640 not on I2C (is the camera plugged in?)")
-
-    chip_id = (_sccb_read(i2c, 0x300A) << 8) | _sccb_read(i2c, 0x300B)
-    print("OV5640 chip id:", hex(chip_id))
-    return chip_id
-
-def _stream_qqvga(i2c):
-    # Software reset, then a slow QQVGA YUV422 window. PLL matches the
-    # esp32-camera setting used for frames smaller than QVGA.
-    print("Resetting sensor...")
-    _sccb_write(i2c, 0x3008, 0x82)
-    sleep(0.1)
-    _sccb_write(i2c, 0x3103, 0x11)
-    _sccb_write(i2c, 0x3008, 0x82)
-    sleep(0.1)
-
-    _sccb_write(i2c, 0x3039, 0x00)
-    _sccb_write(i2c, 0x3034, 0x1A)
-    _sccb_write(i2c, 0x3035, 0x11)
-    _sccb_write(i2c, 0x3036, 20)
-    _sccb_write(i2c, 0x3037, 0x01)
-    _sccb_write(i2c, 0x3108, 0x16)
-    _sccb_write(i2c, 0x3824, 8)
-    _sccb_write(i2c, 0x460C, 0x22)
-    _sccb_write(i2c, 0x3103, 0x13)
-
-    # Active window and QQVGA output size.
-    _sccb_write16(i2c, 0x3800, 0)
-    _sccb_write16(i2c, 0x3802, 0)
-    _sccb_write16(i2c, 0x3804, 2623)
-    _sccb_write16(i2c, 0x3806, 1951)
-    _sccb_write16(i2c, 0x3808, _CAM_W)
-    _sccb_write16(i2c, 0x380A, _CAM_H)
-    _sccb_write16(i2c, 0x380C, 1896)
-    _sccb_write16(i2c, 0x380E, 984)
-    _sccb_write16(i2c, 0x3810, 16)
-    _sccb_write16(i2c, 0x3812, 6)
-
-    # YUV422, binning, vflip. Format register 0x4300 = 0x30 is YUYV.
-    _sccb_write(i2c, 0x4300, 0x30)
-    _sccb_write(i2c, 0x501F, 0x00)
-    _sccb_write(i2c, 0x3820, 0x47)
-    _sccb_write(i2c, 0x3821, 0x01)
-    _sccb_write(i2c, 0x4514, 0xBB)
-    _sccb_write(i2c, 0x4520, 0x0B)
-    _sccb_write(i2c, 0x3814, 0x31)
-    _sccb_write(i2c, 0x3815, 0x31)
-    # DVP output, PCLK only while HREF is high.
-    _sccb_write(i2c, 0x3017, 0xFF)
-    _sccb_write(i2c, 0x3018, 0xFF)
-    _sccb_write(i2c, 0x300E, 0x58)
-    _sccb_write(i2c, 0x4713, 0x03)
-    _sccb_write(i2c, 0x3008, 0x02)
-    sleep(0.05)
-
-    # Enable auto exposure/gain so a normal scene produces visible brightness.
-    _sccb_write(i2c, 0x3503, 0x00)
-    sleep(0.15)
-    print("Sensor streaming")
+def _start_xclk():
+    xclk = machine.PWM(machine.Pin(_XCLK_PIN), freq=_XCLK_FREQ, duty_u16=32768)
+    print("XCLK", xclk.freq(), "Hz on GPIO", _XCLK_PIN)
+    return xclk
 
 
-def _enable_camera_dma():
-    clk = machine.mem32[_SYSTEM + 0x1C]
-    rst = machine.mem32[_SYSTEM + 0x24]
-    machine.mem32[_SYSTEM + 0x1C] = (clk | (1 << 8) | (1 << 6)) & 0xFFFFFFFF
-    rst = machine.mem32[_SYSTEM + 0x24]
-    machine.mem32[_SYSTEM + 0x24] = (rst & ~((1 << 8) | (1 << 6))) & 0xFFFFFFFF
-    date = machine.mem32[_LCD_CAM + 0xFC] & 0xFFFFFFFF
-    print("LCD_CAM date", hex(date))
-    if date == 0:
-        raise OSError("LCD_CAM clock did not start")
+def _prepare_dvp_pins():
+    for pin in (_VSYNC_PIN, _HREF_PIN, _PCLK_PIN) + _DATA_PINS:
+        machine.Pin(pin, machine.Pin.IN)
 
-    # Route the camera into LCD_CAM. XCLK stays on PWM; do not also drive it.
-    esp.gpio_matrix_in(_PCLK, _CAM_PCLK_SIG, False)
-    esp.gpio_matrix_in(_HREF, _CAM_HREF_SIG, False)
-    esp.gpio_matrix_in(_VSYNC, _CAM_VSYNC_SIG, False)
-    bit = 0
-    for gpio in _DVP:
-        esp.gpio_matrix_in(gpio, _CAM_DATA0 + bit, False)
-        bit += 1
-
-
-def _grab(buf):
-    # Each DMA node can hold 4095 bytes, and the node itself must sit in
-    # internal RAM. The picture buffer can stay in PSRAM. The next pointer
-    # is a full address; only the link register uses the low 20 bits.
-    size = len(buf)
-    baddr = uctypes.addressof(buf)
-    nodes = (size + 2047) // 2048
-    words = nodes * 3
-    saved = bytearray(words * 4)
-    si = 0
-    while si < words:
-        machine.mem32[uctypes.addressof(saved) + si * 4] = machine.mem32[_DMA_DESC + si * 4]
-        si += 1
-
-    # Best-effort VSYNC sync using direct GPIO IN reg (reliable even when matrix-routed).
-    # We wait for a rising edge so capture starts near top of frame. If no edge seen
-    # within timeout we just proceed (DMA will still clock whatever is on the bus).
-    t0 = ticks_ms()
-    def _vs_high():
-        return (machine.mem32[_GPIO_IN] & (1 << _VSYNC)) != 0
-    # Wait until VSYNC is low (or timeout)
-    while _vs_high() and ticks_diff(ticks_ms(), t0) < 150:
-        pass
-    # Wait for rising edge (low -> high)
-    while (not _vs_high()) and ticks_diff(ticks_ms(), t0) < 400:
-        pass
-    vs_wait = ticks_diff(ticks_ms(), t0)
-    print("vsync sync waited", vs_wait, "ms")
-
-    n = 0
-    off = 0
-    while off < size:
-        addr = _DMA_DESC + n * 12
-        take = size - off
-        if take > 2048:
-            take = 2048
-        owner = take | (1 << 31)
-        nxt = 0
-        if off + take < size:
-            nxt = _DMA_DESC + (n + 1) * 12
-        else:
-            owner |= 1 << 30
-        machine.mem32[addr] = owner
-        machine.mem32[addr + 4] = baddr + off
-        machine.mem32[addr + 8] = nxt
-        n += 1
-        off += take
-
-    # 8-bit DVP, VSYNC filter on, converter bypassed, EOF at buffer length.
-    machine.mem32[_LCD_CAM + 0x04] = 0
-    machine.mem32[_LCD_CAM + 0x08] = (size - 1) | (1 << 23)
-    machine.mem32[_LCD_CAM + 0x0C] = 0
-    machine.mem32[_LCD_CAM + 0x04] = 1 << 4
-
-    machine.mem32[_GDMA + 0x00] = 1
-    machine.mem32[_GDMA + 0x00] = 0
-    machine.mem32[_GDMA + 0x04] = 12
-    machine.mem32[_GDMA + 0x48] = 5
-    machine.mem32[_GDMA + 0x14] = 0x3FF
-    machine.mem32[_GDMA + 0x20] = (_DMA_DESC & 0xFFFFF) | (1 << 22)
-    machine.mem32[_LCD_CAM + 0x08] = (size - 1) | (1 << 23) | (1 << 29)
-    machine.mem32[_LCD_CAM + 0x04] = 1 << 4
-
-    start = ticks_ms()
-    raw = 0
-    while ticks_diff(ticks_ms(), start) < 800:
-        raw = machine.mem32[_GDMA + 0x08] & 0xFFFFFFFF
-        if raw & 0x02:
-            break
-
-    machine.mem32[_GDMA + 0x20] = 1 << 21
-    machine.mem32[_LCD_CAM + 0x08] = (size - 1) | (1 << 23)
-    filled = 0
-    ni = 0
-    while ni < n:
-        filled += (machine.mem32[_DMA_DESC + ni * 12] >> 12) & 0xFFF
-        ni += 1
-    si = 0
-    while si < words:
-        machine.mem32[_DMA_DESC + si * 4] = machine.mem32[uctypes.addressof(saved) + si * 4]
-        si += 1
-
-    if raw & 0x02:
-        print("grab eof raw=", hex(raw), "filled=", filled)
-        return filled
-
-    # Fallback: if no EOF (e.g. sync started at bad phase), try one immediate grab
-    # without re-building a full sync wait. Re-arm and start again.
-    print("grab no eof, retrying immediate...")
-    # re-arm descriptors (owner bits)
-    off = 0
-    ni = 0
-    while off < size:
-        addr = _DMA_DESC + ni * 12
-        take = size - off
-        if take > 2048:
-            take = 2048
-        owner = take | (1 << 31)
-        if off + take >= size:
-            owner |= 1 << 30
-        machine.mem32[addr] = owner
-        machine.mem32[addr + 4] = baddr + off
-        # next already set from first build
-        ni += 1
-        off += take
-
-    machine.mem32[_GDMA + 0x00] = 1
-    machine.mem32[_GDMA + 0x00] = 0
-    machine.mem32[_GDMA + 0x20] = (_DMA_DESC & 0xFFFFF) | (1 << 22)
-    machine.mem32[_LCD_CAM + 0x08] = (size - 1) | (1 << 23) | (1 << 29)
-    machine.mem32[_LCD_CAM + 0x04] = 1 << 4
-
-    start = ticks_ms()
-    raw = 0
-    while ticks_diff(ticks_ms(), start) < 800:
-        raw = machine.mem32[_GDMA + 0x08] & 0xFFFFFFFF
-        if raw & 0x02:
-            break
-    machine.mem32[_GDMA + 0x20] = 1 << 21
-    machine.mem32[_LCD_CAM + 0x08] = (size - 1) | (1 << 23)
-    filled = 0
-    ni = 0
-    while ni < n:
-        filled += (machine.mem32[_DMA_DESC + ni * 12] >> 12) & 0xFFF
-        ni += 1
-    si = 0
-    while si < words:
-        machine.mem32[_DMA_DESC + si * 4] = machine.mem32[uctypes.addressof(saved) + si * 4]
-        si += 1
-    print("grab2 raw=", hex(raw), "filled=", filled)
-    if raw & 0x02:
-        return filled
-    return 0
 
 print("Forcing backlight GPIO high...")
 _bl_pin = machine.Pin(_BL, machine.Pin.OUT)
@@ -438,7 +434,6 @@ display = axs15231b.AXS15231B(
     frame_buffer2=buf2,
 )
 _install_axs15231b_qspi_workarounds(display)
-
 _bl_pin.value(1)
 print("Display ready")
 
@@ -450,95 +445,99 @@ scrn.set_scrollbar_mode(lv.SCROLLBAR_MODE.OFF)
 
 title = lv.label(scrn)
 title.set_text("OV5640")
-title.set_style_text_color(lv.color_hex(0xFFFFFF), 0)
-title.align(lv.ALIGN.TOP_MID, 0, 8)
+title.set_style_text_color(lv.color_hex(0x8BE9FD), 0)
+title.align(lv.ALIGN.TOP_MID, 0, 16)
 
 status = lv.label(scrn)
 status.set_style_text_color(lv.color_hex(0xA0A8B0), 0)
-status.align(lv.ALIGN.BOTTOM_MID, 0, -8)
+status.set_style_bg_color(lv.color_hex(0x101418), 0)
+status.set_style_bg_opa(255, 0)
+status.align(lv.ALIGN.BOTTOM_MID, 0, -20)
+status.set_text("starting")
 
-_canvas_buf = bytearray(_CAM_W * _CAM_H * 2)
-_frame = bytearray(_FRAME_BYTES)
-canvas = lv.canvas(scrn)
-canvas.set_buffer(_canvas_buf, _CAM_W, _CAM_H, lv.COLOR_FORMAT.RGB565)
-canvas.align(lv.ALIGN.CENTER, 0, 0)
-canvas.fill_bg(lv.color_hex(0x202428), lv.OPA.COVER)
+lv.task_handler()
+lv.refr_now(None)
 
-print("Opening I2C...")
+print("Opening I2C bus...")
 _i2c = machine.SoftI2C(
     sda=machine.Pin(_I2C_SDA),
     scl=machine.Pin(_I2C_SCL),
     freq=100000,
 )
+_enable_camera_power(_i2c)
+_xclk = _start_xclk()
+sleep(0.05)
+print("I2C scan:", [hex(addr) for addr in _i2c.scan()])
 
+cam_error = None
+sensor = OV5640(_i2c)
 try:
-    _chip_id = _start_camera(_i2c)
-    if _chip_id != _OV5640_ID:
-        raise RuntimeError("chip id " + hex(_chip_id))
-    _stream_qqvga(_i2c)
-    _enable_camera_dma()
+    if _OV5640_ADDR not in _i2c.scan():
+        raise OSError("OV5640 0x3C not on I2C (is XCLK running?)")
+    pid = sensor.pid()
+    print("OV5640 PID", hex(pid))
+    if pid != 0x5640:
+        raise OSError("unexpected camera PID %s" % hex(pid))
+    print("Initializing OV5640...")
+    sensor.init()
+    _prepare_dvp_pins()
+    print("OV5640 ready")
 except Exception as exc:
+    cam_error = exc
     print("Camera init failed:", exc)
+
+if cam_error is not None:
     status.set_text("camera init failed")
+    err = lv.label(scrn)
+    err.set_style_text_color(lv.color_hex(0xFF5555), 0)
+    err.set_text(str(cam_error))
+    err.set_long_mode(lv.label.LONG.WRAP)
+    err.set_width(280)
+    err.align(lv.ALIGN.CENTER, 0, 0)
+    print("Display stays up. Camera error:", cam_error)
     while True:
         lv.task_handler()
-        sleep(0.05)
+        sleep(0.1)
 
-# Prove the canvas is on screen before touching the camera DMA block.
-_i = 0
-_pixels = _CAM_W * _CAM_H
-while _i < _pixels:
-    if (_i // _CAM_W) < 40:
-        _canvas_buf[_i * 2] = 0x00
-        _canvas_buf[_i * 2 + 1] = 0xF8
-    elif (_i // _CAM_W) < 80:
-        _canvas_buf[_i * 2] = 0xE0
-        _canvas_buf[_i * 2 + 1] = 0x07
-    else:
-        _canvas_buf[_i * 2] = 0x1F
-        _canvas_buf[_i * 2 + 1] = 0x00
-    _i += 1
-canvas.invalidate()
-status.set_text("bars")
-print("Color bars on canvas")
-_t = ticks_ms()
-while ticks_diff(ticks_ms(), _t) < 400:
-    lv.task_handler()
-    sleep(0.02)
+_y8 = bytearray(_CAM_W * _CAM_H)
+_rgb = bytearray(_PREVIEW_W * _PREVIEW_H * 2)
+_img_dsc = lv.image_dsc_t(
+    {
+        "header": {
+            "magic": lv.IMAGE_HEADER_MAGIC,
+            "cf": lv.COLOR_FORMAT.RGB565,
+            "w": _PREVIEW_W,
+            "h": _PREVIEW_H,
+            "stride": _PREVIEW_W * 2,
+        },
+        "data_size": len(_rgb),
+        "data": _rgb,
+    }
+)
 
-print("Grabbing one frame...")
-status.set_text("grabbing")
+cam_img = lv.image(scrn)
+cam_img.set_src(_img_dsc)
+cam_img.align(lv.ALIGN.CENTER, 0, 8)
+
+status.set_text("%dx%d Y8" % (_CAM_W, _CAM_H))
 lv.task_handler()
-_got = _grab(_frame)
-if _got == 0:
-    status.set_text("no frame")
-    print("No frame")
-else:
-    # YUYV422: typically Y0,U0,Y1,V0,... so Y is at even indices.
-    # Compute stats for diagnostics.
-    _nz = 0
-    _mn = 255
-    _mx = 0
-    for _b in _frame:
-        if _b < _mn:
-            _mn = _b
-        if _b > _mx:
-            _mx = _b
-        if _b != 0xFF and _b != 0x00:
-            _nz += 1
-    _head = bytes(_frame[:16])
-    print("frame bytes=", _got, "min=", hex(_mn), "max=", hex(_mx), "varied=", _nz)
-    print("head:", _head)
-    _i = 0
-    while _i < _pixels:
-        _y = _frame[_i * 2]  # even byte = Y for standard YUYV
-        _canvas_buf[_i * 2] = (_y >> 3) | ((_y & 0x1C) << 3)
-        _canvas_buf[_i * 2 + 1] = (_y & 0xF8) | (_y >> 5)
-        _i += 1
-    canvas.invalidate()
-    lv.task_handler()
-    lv.task_handler()
-    status.set_text(str(_got) + "B " + str(_nz) + "v")
+lv.refr_now(None)
+print("Preview %dx%d Y8 -> %dx%d. Ctrl-C to stop." % (_CAM_W, _CAM_H, _PREVIEW_W, _PREVIEW_H))
+
+_frames = 0
 while True:
+    rc = _capture_y8(_y8, _CAM_W, _CAM_H)
+    if rc != _CAM_H:
+        print("capture", rc)
+        status.set_text("capture %s" % rc)
+    else:
+        _y8_to_rgb565_2x(_y8, _rgb, _CAM_W, _CAM_H)
+        cam_img.set_src(_img_dsc)
+        _frames += 1
+        if _frames == 1 or _frames % 8 == 0:
+            print("frame", _frames)
+            status.set_text("live  %d" % _frames)
+    # Full-screen refresh: this QSPI panel misplaces partial dirty regions.
+    scrn.invalidate()
     lv.task_handler()
-    sleep(0.05)
+    lv.refr_now(None)

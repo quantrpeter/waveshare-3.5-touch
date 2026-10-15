@@ -33,10 +33,11 @@ _I2C_SCL = 7
 _TCA_ADDR = 0x20
 _LCD_CMD_CASET = 0x2A
 _LCD_CMD_RAMWR = 0x2C
-_LCD_CMD_RASET = 0x2B
 _LCD_CMD_RAMWRC = 0x3C
 _LCD_QSPI_WRITE_COLOR = 0x32
-_DRAW_BUFFER_LINES = 80
+# Same band size as the working animation example. Full-width strips
+# are required; smaller partial rectangles scramble this QSPI panel.
+_DRAW_BUFFER_LINES = 240
 
 _TOUCH_I2C_ADDR = 0x3B
 
@@ -65,6 +66,9 @@ def _install_axs15231b_qspi_workarounds(display):
     if display._data_bus.get_lane_count() != 4:
         return
 
+    # Match displayImage_animation_new_hardware. This panel's QSPI path
+    # only stays aligned when each flush is a full-width strip: CASET,
+    # then RAMWR for the first strip and RAMWRC to continue downward.
     def _set_memory_location_qspi(x1, y1, x2, y2):
         param_buf = display._param_buf
 
@@ -72,13 +76,8 @@ def _install_axs15231b_qspi_workarounds(display):
         param_buf[1] = x1 & 0xFF
         param_buf[2] = (x2 >> 8) & 0xFF
         param_buf[3] = x2 & 0xFF
-        display.set_params(_LCD_CMD_CASET, display._param_mv[:4])
 
-        param_buf[0] = (y1 >> 8) & 0xFF
-        param_buf[1] = y1 & 0xFF
-        param_buf[2] = (y2 >> 8) & 0xFF
-        param_buf[3] = y2 & 0xFF
-        display.set_params(_LCD_CMD_RASET, display._param_mv[:4])
+        display.set_params(_LCD_CMD_CASET, display._param_mv[:4])
 
         if y1 == 0:
             return _qspi_color_cmd(_LCD_CMD_RAMWR)
@@ -175,8 +174,13 @@ print("Touch driver initialized")
 
 print("Display ready")
 
-# Initialize task handler for LVGL
+# TaskHandler polls the touch controller. Pause LVGL's refresh timer so
+# that poll cannot flush a partial rectangle and scramble the panel.
+# The game loop paints the full screen itself with lv.refr_now().
 th = task_handler.TaskHandler()
+_refr_timer = lv.display_get_default().get_refr_timer()
+if _refr_timer:
+    _refr_timer.pause()
 
 # Create screen
 scrn = lv.screen_active()
@@ -321,6 +325,9 @@ lv.task_handler()
 lv.refr_now(None)
 
 while True:
+    # Read touch before spending the frame on a full-screen flush.
+    lv.task_handler()
+
     if jump_requested:
         jump_requested = False
         if game_over:
@@ -360,5 +367,8 @@ while True:
             if p.is_off_screen():
                 p.deactivate()
 
-    lv.task_handler()
+    # Repaint the whole screen every frame. Partial dirty rectangles
+    # (the bird and pipes) land on the wrong pixels and the panel snows.
+    scrn.invalidate()
+    lv.refr_now(None)
     sleep(0.02)
