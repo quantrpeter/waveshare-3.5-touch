@@ -2,12 +2,21 @@ import lcd_bus
 import machine
 import micropython
 import gc
-from time import sleep
+import array
+from time import sleep, ticks_ms, ticks_diff
 import axs15231b
 import lvgl as lv
+import builtins
+builtins.lv = lv  # the axs15231 touch driver expects a global `lv`
 import task_handler
+import i2c
+import axs15231
 
-# OV5640 preview for Waveshare ESP32-S3-Touch-LCD-3.5B (AXS15231B).
+# OV5640 camera demo for Waveshare ESP32-S3-Touch-LCD-3.5B (AXS15231B).
+# Live colour preview with touch controls: FREEZE/RESUME, MIRROR, FLIP and an
+# effect cycler (colour, gray, thermal, night vision, sepia, negative, mono).
+# Non-colour effects map luma through a 256-entry RGB565 lookup table.
+# Effects, mirror and flip also apply to a frozen frame.
 # Display pins match the other *_new_hardware examples.
 # Camera pins match Waveshare Arduino `03_camera_web_server`:
 #   XCLK=38  SIOD=8  SIOC=7  VSYNC=17  HREF=18  PCLK=41
@@ -15,7 +24,7 @@ import task_handler
 # This lvgl_micropython build has no esp32-camera C module, so frames are
 # sampled from the DVP pins in viper. RGB565 DVP on this module does not
 # emit one PCLK per byte (HREF stays high for ~9781 clocks), so the preview
-# uses Y8 at a slowed PCLK and expands it to RGB565 gray on a canvas.
+# captures YUYV at a slowed PCLK and converts it to RGB565 in viper.
 
 _WIDTH = 320
 _HEIGHT = 480
@@ -29,15 +38,17 @@ _LCD_CS = 12
 _BL = 6
 _LCD_FREQ = 40000000
 _LCD_CMD_CASET = 0x2A
-_LCD_CMD_RASET = 0x2B
 _LCD_CMD_RAMWR = 0x2C
 _LCD_CMD_RAMWRC = 0x3C
 _LCD_QSPI_WRITE_COLOR = 0x32
-_DRAW_BUFFER_LINES = 48
+# Same band size as flippybird / the animation example; full-width
+# 240-line strips keep this QSPI panel aligned.
+_DRAW_BUFFER_LINES = 240
 
 _I2C_SDA = 8
 _I2C_SCL = 7
 _PMU_ADDR = 0x34
+_TOUCH_I2C_ADDR = 0x3B
 _OV5640_ADDR = 0x3C
 _XCLK_PIN = 38
 _XCLK_FREQ = 10000000
@@ -67,6 +78,10 @@ def _install_axs15231b_qspi_workarounds(display):
     if display._data_bus.get_lane_count() != 4:
         return
 
+    # Match flippybird / displayImage_animation_new_hardware. This panel's
+    # QSPI path only stays aligned when each flush is a full-width strip:
+    # CASET, then RAMWR for the first strip and RAMWRC to continue downward.
+    # Sending RASET or restarting RAMWR mid-screen scrambles the image.
     def _set_memory_location_qspi(x1, y1, x2, y2):
         param_buf = display._param_buf  # NOQA
 
@@ -76,16 +91,10 @@ def _install_axs15231b_qspi_workarounds(display):
         param_buf[3] = x2 & 0xFF
         display.set_params(_LCD_CMD_CASET, display._param_mv[:4])
 
-        param_buf[0] = (y1 >> 8) & 0xFF
-        param_buf[1] = y1 & 0xFF
-        param_buf[2] = (y2 >> 8) & 0xFF
-        param_buf[3] = y2 & 0xFF
-        display.set_params(_LCD_CMD_RASET, display._param_mv[:4])
+        if y1 == 0:
+            return _qspi_color_cmd(_LCD_CMD_RAMWR)
 
-        # Always start a new RAM write. RAMWRC is only valid as a continuation
-        # of a flush that began at y=0; a centered camera widget starts at
-        # y~120 and otherwise lands in the wrong place (garbled stripes).
-        return _qspi_color_cmd(_LCD_CMD_RAMWR)
+        return _qspi_color_cmd(_LCD_CMD_RAMWRC)
 
     display._set_memory_location = _set_memory_location_qspi
 
@@ -214,9 +223,10 @@ _OV5640_INIT = (
     (0x558A, 0x00),
     (0x558B, 0xF8),
     (0x501D, 0x40),
-    # Y8 (grayscale) on DVP. RGB565 HREF is not one byte per PCLK on this module.
+    # YUV422 (YUYV) on DVP: 2 bytes per pixel, converted to RGB565 in viper.
+    # RGB565 HREF is not one byte per PCLK on this module.
     (0x501F, 0x00),
-    (0x4300, 0x10),
+    (0x4300, 0x30),
     (0x3820, 0x41),
     (0x3821, 0x01),
     (0x4514, 0xAA),
@@ -234,10 +244,14 @@ _OV5640_INIT = (
     (0x3809, 0xA0),
     (0x380A, 0x00),
     (0x380B, 0x78),
-    (0x380C, 0x08),
-    (0x380D, 0x0C),
-    (0x380E, 0x00),
-    (0x380F, 0xB0),
+    # HTS 4120 (2x the usual 2060) so each output row of 320 YUYV bytes
+    # fits through the ~250 kHz PCLK before the next row is ready.
+    (0x380C, 0x10),
+    (0x380D, 0x18),
+    # VTS 984 = 1968 / 2, as esp32-camera uses for 2x2 binned 4:3 modes.
+    # A short VTS (0xB0) cuts the array readout and AEC, leaving a black image.
+    (0x380E, 0x03),
+    (0x380F, 0xD8),
     (0x3810, 0x00),
     (0x3811, 0x10),
     (0x3812, 0x00),
@@ -284,11 +298,59 @@ class OV5640:
 
 
 @micropython.viper
-def _capture_y8(buf: ptr8, width: int, height: int) -> int:
+def _href_gaps(out: ptr32, n: int):
+    # Record how long HREF stays low before each of the next `n` lines,
+    # in loop iterations. The loop matches the sync loop in _capture_frame.
+    gpio_in = ptr32(0x6000403C)
+    href = 1 << 18
+    while gpio_in[0] & href:
+        pass
+    i = 0
+    while i < n:
+        c = 0
+        while (gpio_in[0] & href) == 0:
+            c += 1
+            if c > 50000000:
+                return
+        out[i] = c
+        while gpio_in[0] & href:
+            pass
+        i += 1
+
+
+@micropython.viper
+def _capture_frame(buf: ptr8, width: int, height: int, gap_threshold: int) -> int:
+    # `width` is bytes per line (2 per pixel for YUYV).
     gpio_in = ptr32(0x6000403C)
     gpio_in1 = ptr32(0x60004040)
     href = 1 << 18
     pclk = 1 << 9
+    # VSYNC never pulses at this slowed PCLK, so find the frame start from
+    # HREF instead: vertical blanking is a low gap several lines long.
+    # The first HREF after it is a short dummy line, which the row loop
+    # below skips by waiting for that line to end.
+    t = 20000000
+    while gpio_in[0] & href:
+        t -= 1
+        if t == 0:
+            return -1
+    tries = 0
+    while True:
+        c = 0
+        while (gpio_in[0] & href) == 0:
+            c += 1
+            if c > 50000000:
+                return -2
+        if c > gap_threshold:
+            break
+        t = 20000000
+        while gpio_in[0] & href:
+            t -= 1
+            if t == 0:
+                return -1
+        tries += 1
+        if tries > 1000:
+            return -3
     lastx = 0
     y = 0
     while y < height:
@@ -337,29 +399,118 @@ def _capture_y8(buf: ptr8, width: int, height: int) -> int:
 
 
 @micropython.viper
-def _y8_to_rgb565_2x(src: ptr8, dst: ptr8, width: int, height: int):
+def _yuyv_to_rgb565_2x(src: ptr8, dst: ptr16, lut: ptr16, width: int, height: int, flags: int):
+    # Each source pixel becomes a 2x2 block of RGB565.
+    # flags: 1 = mirror, 2 = vertical flip, 4 = true colour (else lut[Y]).
+    mirror = flags & 1
+    vflip = flags & 2
+    color = flags & 4
+    out_w = width * 2
     y = 0
     while y < height:
+        src_row = y * width * 2
+        oy = height - 1 - y if vflip else y
+        dst_row0 = (oy * 2) * out_w
+        dst_row1 = dst_row0 + out_w
         x = 0
-        src_row = y * width
-        dst_row0 = (y * 2) * width * 4
-        dst_row1 = dst_row0 + width * 4
         while x < width:
-            g = src[src_row + x]
-            pix = ((g >> 3) << 11) | ((g >> 2) << 5) | (g >> 3)
-            lo = pix & 0xFF
-            hi = pix >> 8
-            d = x * 4
-            dst[dst_row0 + d] = lo
-            dst[dst_row0 + d + 1] = hi
-            dst[dst_row0 + d + 2] = lo
-            dst[dst_row0 + d + 3] = hi
-            dst[dst_row1 + d] = lo
-            dst[dst_row1 + d + 1] = hi
-            dst[dst_row1 + d + 2] = lo
-            dst[dst_row1 + d + 3] = hi
-            x += 1
+            base = src_row + x * 2
+            y0 = src[base]
+            y1 = src[base + 2]
+            if color:
+                u = src[base + 1] - 128
+                v = src[base + 3] - 128
+                rd = (359 * v) >> 8
+                gd = (88 * u + 183 * v) >> 8
+                bd = (454 * u) >> 8
+            k = 0
+            while k < 2:
+                lum = y1 if k else y0
+                if color:
+                    r = lum + rd
+                    g = lum - gd
+                    b = lum + bd
+                    if r < 0:
+                        r = 0
+                    elif r > 255:
+                        r = 255
+                    if g < 0:
+                        g = 0
+                    elif g > 255:
+                        g = 255
+                    if b < 0:
+                        b = 0
+                    elif b > 255:
+                        b = 255
+                    pix = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
+                else:
+                    pix = lut[lum]
+                ox = x + k
+                if mirror:
+                    ox = width - 1 - ox
+                d = ox * 2
+                dst[dst_row0 + d] = pix
+                dst[dst_row0 + d + 1] = pix
+                dst[dst_row1 + d] = pix
+                dst[dst_row1 + d + 1] = pix
+                k += 1
+            x += 2
         y += 1
+
+
+def _rgb565(r, g, b):
+    return ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
+
+
+def _lerp(a, b, t, span):
+    return a + (b - a) * t // span
+
+
+def _thermal(v):
+    # black -> blue -> magenta -> red -> yellow -> white
+    stops = (
+        (0, (0, 0, 0)),
+        (64, (0, 0, 160)),
+        (112, (160, 0, 160)),
+        (160, (230, 30, 0)),
+        (210, (255, 210, 0)),
+        (255, (255, 255, 255)),
+    )
+    for i in range(len(stops) - 1):
+        p0, c0 = stops[i]
+        p1, c1 = stops[i + 1]
+        if v <= p1:
+            t = v - p0
+            span = p1 - p0
+            return (
+                _lerp(c0[0], c1[0], t, span),
+                _lerp(c0[1], c1[1], t, span),
+                _lerp(c0[2], c1[2], t, span),
+            )
+    return stops[-1][1]
+
+
+def _build_lut(fn):
+    lut = bytearray(512)
+    mv = memoryview(lut)
+    for v in range(256):
+        r, g, b = fn(v)
+        pix = _rgb565(min(r, 255), min(g, 255), min(b, 255))
+        mv[v * 2] = pix & 0xFF
+        mv[v * 2 + 1] = pix >> 8
+    return lut
+
+
+# A None palette means true colour from the YUYV chroma.
+_EFFECTS = (
+    ("Color", None),
+    ("Gray", lambda v: (v, v, v)),
+    ("Thermal", _thermal),
+    ("Night", lambda v: (v // 6, v, v // 5)),
+    ("Sepia", lambda v: (v * 112 // 100 + 20, v * 92 // 100 + 10, v * 70 // 100)),
+    ("Negative", lambda v: (255 - v, 255 - v, 255 - v)),
+    ("Mono", lambda v: (255, 255, 255) if v >= 110 else (0, 0, 0)),
+)
 
 
 def _enable_camera_power(i2c):
@@ -388,6 +539,16 @@ def _start_xclk():
 def _prepare_dvp_pins():
     for pin in (_VSYNC_PIN, _HREF_PIN, _PCLK_PIN) + _DATA_PINS:
         machine.Pin(pin, machine.Pin.IN)
+
+
+def _frame_gap_threshold():
+    # Normal line gaps are all about the same; blanking is ~6x longer.
+    gaps = array.array("i", [0] * 130)
+    _href_gaps(gaps, len(gaps))
+    normal = sorted(gaps)[len(gaps) // 2]
+    if normal <= 0:
+        raise OSError("no HREF from camera")
+    return normal * 3
 
 
 print("Forcing backlight GPIO high...")
@@ -438,25 +599,34 @@ _bl_pin.value(1)
 print("Display ready")
 
 th = task_handler.TaskHandler()
+# TaskHandler polls touch. Pause LVGL's own refresh timer so a button press
+# cannot flush a partial rectangle; the main loop repaints the full screen.
+_refr_timer = lv.display_get_default().get_refr_timer()
+if _refr_timer:
+    _refr_timer.pause()
+
+
+def _refresh():
+    scrn.invalidate()
+    lv.refr_now(None)
+
 
 scrn = lv.screen_active()
 scrn.set_style_bg_color(lv.color_hex(0x101418), 0)
 scrn.set_scrollbar_mode(lv.SCROLLBAR_MODE.OFF)
 
 title = lv.label(scrn)
-title.set_text("OV5640")
+title.set_text("OV5640 Camera Demo")
 title.set_style_text_color(lv.color_hex(0x8BE9FD), 0)
-title.align(lv.ALIGN.TOP_MID, 0, 16)
+title.set_style_text_font(lv.font_montserrat_16, 0)
+title.align(lv.ALIGN.TOP_MID, 0, 12)
 
 status = lv.label(scrn)
 status.set_style_text_color(lv.color_hex(0xA0A8B0), 0)
-status.set_style_bg_color(lv.color_hex(0x101418), 0)
-status.set_style_bg_opa(255, 0)
-status.align(lv.ALIGN.BOTTOM_MID, 0, -20)
+status.align(lv.ALIGN.TOP_MID, 0, 290)
 status.set_text("starting")
 
-lv.task_handler()
-lv.refr_now(None)
+_refresh()
 
 print("Opening I2C bus...")
 _i2c = machine.SoftI2C(
@@ -481,7 +651,9 @@ try:
     print("Initializing OV5640...")
     sensor.init()
     _prepare_dvp_pins()
-    print("OV5640 ready")
+    sleep(0.3)
+    _gap_threshold = _frame_gap_threshold()
+    print("OV5640 ready, frame gap threshold", _gap_threshold)
 except Exception as exc:
     cam_error = exc
     print("Camera init failed:", exc)
@@ -494,12 +666,26 @@ if cam_error is not None:
     err.set_long_mode(lv.label.LONG.WRAP)
     err.set_width(280)
     err.align(lv.ALIGN.CENTER, 0, 0)
+    _refresh()
     print("Display stays up. Camera error:", cam_error)
     while True:
         lv.task_handler()
         sleep(0.1)
 
-_y8 = bytearray(_CAM_W * _CAM_H)
+# Touch is opened only after the OV5640 has been configured over SoftI2C,
+# because the hardware I2C bus takes over the same SDA/SCL pins.
+print("Initializing AXS15231 touch...")
+i2c_bus = i2c.I2C.Bus(host=0, scl=_I2C_SCL, sda=_I2C_SDA)
+touch_dev = i2c.I2C.Device(bus=i2c_bus, dev_id=_TOUCH_I2C_ADDR, reg_bits=axs15231.BITS)
+indev = axs15231.AXS15231(touch_dev)
+print("Touch driver initialized")
+
+print("Building palettes...")
+_gray_lut = _build_lut(lambda v: (v, v, v))
+_luts = [_build_lut(fn) if fn else _gray_lut for _, fn in _EFFECTS]
+gc.collect()
+
+_yuyv = bytearray(_CAM_W * 2 * _CAM_H)
 _rgb = bytearray(_PREVIEW_W * _PREVIEW_H * 2)
 _img_dsc = lv.image_dsc_t(
     {
@@ -517,27 +703,121 @@ _img_dsc = lv.image_dsc_t(
 
 cam_img = lv.image(scrn)
 cam_img.set_src(_img_dsc)
-cam_img.align(lv.ALIGN.CENTER, 0, 8)
+cam_img.align(lv.ALIGN.TOP_MID, 0, 40)
 
-status.set_text("%dx%d Y8" % (_CAM_W, _CAM_H))
-lv.task_handler()
-lv.refr_now(None)
-print("Preview %dx%d Y8 -> %dx%d. Ctrl-C to stop." % (_CAM_W, _CAM_H, _PREVIEW_W, _PREVIEW_H))
+fps_label = lv.label(scrn)
+fps_label.set_style_text_color(lv.color_hex(0xFFFFFF), 0)
+fps_label.set_style_bg_color(lv.color_hex(0x000000), 0)
+fps_label.set_style_bg_opa(160, 0)
+fps_label.set_style_pad_all(3, 0)
+fps_label.set_text("-- fps")
+fps_label.align(lv.ALIGN.TOP_RIGHT, -6, 46)
+
+_state = {"effect": 0, "mirror": False, "flip": True, "frozen": False, "dirty": False}
+_COLOR_ON = lv.color_hex(0x2E8B57)
+_COLOR_OFF = lv.color_hex(0x2A3440)
+
+
+def _make_button(text, x, y, w, cb):
+    btn = lv.button(scrn)
+    btn.set_size(w, 64)
+    btn.set_pos(x, y)
+    btn.set_style_bg_color(_COLOR_OFF, 0)
+    btn.set_style_radius(10, 0)
+    lbl = lv.label(btn)
+    lbl.set_text(text)
+    lbl.set_style_text_font(lv.font_montserrat_16, 0)
+    lbl.center()
+    # PRESSED rather than CLICKED: a capture blocks the loop, so a short tap
+    # may not be seen both pressed and released.
+    btn.add_event_cb(cb, lv.EVENT.PRESSED, None)
+    return btn, lbl
+
+
+def _on_freeze(event):
+    _state["frozen"] = not _state["frozen"]
+    _update_controls()
+
+
+def _on_mirror(event):
+    _state["mirror"] = not _state["mirror"]
+    _update_controls()
+
+
+def _on_flip(event):
+    _state["flip"] = not _state["flip"]
+    _update_controls()
+
+
+def _on_effect(event):
+    _state["effect"] = (_state["effect"] + 1) % len(_EFFECTS)
+    _update_controls()
+
+
+freeze_btn, freeze_lbl = _make_button("FREEZE", 12, 320, 92, _on_freeze)
+mirror_btn, mirror_lbl = _make_button("MIRROR", 114, 320, 92, _on_mirror)
+flip_btn, flip_lbl = _make_button("FLIP", 216, 320, 92, _on_flip)
+effect_btn, effect_lbl = _make_button("", 12, 396, 296, _on_effect)
+
+
+def _update_controls():
+    frozen = _state["frozen"]
+    freeze_lbl.set_text("RESUME" if frozen else "FREEZE")
+    freeze_btn.set_style_bg_color(lv.color_hex(0xB03A2E) if frozen else _COLOR_OFF, 0)
+    mirror_btn.set_style_bg_color(_COLOR_ON if _state["mirror"] else _COLOR_OFF, 0)
+    flip_btn.set_style_bg_color(_COLOR_ON if _state["flip"] else _COLOR_OFF, 0)
+    effect_lbl.set_text("Effect: %s  >" % _EFFECTS[_state["effect"]][0])
+    _state["dirty"] = True
+
+
+def _render():
+    effect = _state["effect"]
+    flags = 1 if _state["mirror"] else 0
+    if _state["flip"]:
+        flags |= 2
+    if _EFFECTS[effect][1] is None:
+        flags |= 4
+    _yuyv_to_rgb565_2x(_yuyv, _rgb, _luts[effect], _CAM_W, _CAM_H, flags)
+    cam_img.set_src(_img_dsc)
+
+
+_update_controls()
+status.set_text("%dx%d YUYV -> %dx%d" % (_CAM_W, _CAM_H, _PREVIEW_W, _PREVIEW_H))
+_refresh()
+print("Preview running. Ctrl-C to stop.")
 
 _frames = 0
+_fps_t0 = ticks_ms()
+_fps_n = 0
 while True:
-    rc = _capture_y8(_y8, _CAM_W, _CAM_H)
+    # Poll touch before spending time on a capture.
+    lv.task_handler()
+
+    if _state["frozen"]:
+        if _state["dirty"]:
+            _state["dirty"] = False
+            _render()  # re-render the held frame with the new effect/mirror
+            fps_label.set_text("paused")
+            _refresh()
+        sleep(0.03)
+        continue
+
+    rc = _capture_frame(_yuyv, _CAM_W * 2, _CAM_H, _gap_threshold)
     if rc != _CAM_H:
         print("capture", rc)
-        status.set_text("capture %s" % rc)
+        status.set_text("capture error %s" % rc)
     else:
-        _y8_to_rgb565_2x(_y8, _rgb, _CAM_W, _CAM_H)
-        cam_img.set_src(_img_dsc)
+        _render()
         _frames += 1
-        if _frames == 1 or _frames % 8 == 0:
-            print("frame", _frames)
-            status.set_text("live  %d" % _frames)
+        _fps_n += 1
+        now = ticks_ms()
+        dt = ticks_diff(now, _fps_t0)
+        if dt >= 1000:
+            fps_text = "%d.%d fps" % (_fps_n * 1000 // dt, (_fps_n * 10000 // dt) % 10)
+            fps_label.set_text(fps_text)
+            print("frame", _frames, fps_text)
+            _fps_t0 = now
+            _fps_n = 0
+    _state["dirty"] = False
     # Full-screen refresh: this QSPI panel misplaces partial dirty regions.
-    scrn.invalidate()
-    lv.task_handler()
-    lv.refr_now(None)
+    _refresh()
